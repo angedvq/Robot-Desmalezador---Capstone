@@ -1,1 +1,3 @@
-# Robot-Desmalezador---Capstone
+# Robot Desmalezador - Capstone
+
+Workspace principal para el proyecto
