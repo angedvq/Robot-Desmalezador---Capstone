@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
 from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 from sklearn.cluster import DBSCAN
@@ -9,9 +10,7 @@ import os
 
 def circfit_HyperSVD(XY):
     XY = np.asarray(XY)
-    if len(XY) < 4:
-        raise ValueError("Se requieren al menos 4 puntos para el ajuste SVD")
-        
+    if len(XY) < 4: raise ValueError("Se requieren al menos 4 puntos para el ajuste SVD")
     centroid = np.mean(XY, axis=0)
     X = XY[:, 0] - centroid[0]
     Y = XY[:, 1] - centroid[1]
@@ -20,35 +19,22 @@ def circfit_HyperSVD(XY):
     U, S, Vt = np.linalg.svd(ZXY1, full_matrices=False)
     V = Vt.T
     
-    if (S[3] / S[0] < 1e-12):
-        A = V[:, 3]
+    if (S[3] / S[0] < 1e-12): A = V[:, 3]
     else:
         R_mean = np.mean(ZXY1, axis=0)
-        N = np.array([
-            [8*R_mean[0], 4*R_mean[1], 4*R_mean[2], 2],
-            [4*R_mean[1], 1, 0, 0],
-            [4*R_mean[2], 0, 1, 0],
-            [2, 0, 0, 0]
-        ], dtype=float)
-        
+        N = np.array([[8*R_mean[0], 4*R_mean[1], 4*R_mean[2], 2], [4*R_mean[1], 1, 0, 0], [4*R_mean[2], 0, 1, 0], [2, 0, 0, 0]], dtype=float)
         W = V @ np.diag(S) @ V.T
         N_inv = np.linalg.pinv(N)
         D, E = np.linalg.eig(W @ N_inv @ W)
-        
         E = np.real(E)
         D = np.real(D)
-        
         ID = np.argsort(D)
         Astar = E[:, ID[1]]
         A, _, _, _ = np.linalg.lstsq(W, Astar, rcond=None)
         
-    if np.isclose(A[0], 0):
-        raise ValueError("A[0] es muy cercano a cero")
-        
+    if np.isclose(A[0], 0): raise ValueError("A[0] es muy cercano a cero")
     rad_inner = A[1]**2 + A[2]**2 - 4*A[0]*A[3]
-    if rad_inner <= 0:
-        raise ValueError("Raíz cuadrada negativa")
-        
+    if rad_inner <= 0: raise ValueError("Raíz cuadrada negativa")
     center_x = -(A[1]) / (2 * A[0]) + centroid[0]
     center_y = -(A[2]) / (2 * A[0]) + centroid[1]
     radius = np.sqrt(rad_inner) / (2 * np.abs(A[0]))
@@ -59,62 +45,64 @@ class LidarTreeDetector(Node):
     def __init__(self):
         super().__init__('lidar_tree_detector')
         self.subscription = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/tree_markers', 10)
 
-        # Angulos de fov de deteccion
-        self.fov_min = np.deg2rad(-30.0) 
-        self.fov_max = np.deg2rad(30.0)
-
-        # Distancia/profundidad minima y maxima para la deteccion
+        # CORRECCIÓN DE FALSOS POSITIVOS: Reducimos el FOV a +- 10 grados
+        self.fov_min = np.deg2rad(-10.0) 
+        self.fov_max = np.deg2rad(10.0)
         self.roi_min_dist = 0.1
         self.roi_max_dist = 2.5  
-
-        # Frames consecutivos requeridos para dar un positivo
         self.required_detections = 6      
         self.consecutive_detections = 0    
 
-        # Monitorización de recursos 
-        self.process = psutil.Process(os.getpid())
-        self.process.cpu_percent() 
-        self.cpu_records = []
-        self.ram_records = []
-        self.threads_records = []
-        self.total_system_cores = psutil.cpu_count(logical=True)
-        self.resource_timer = self.create_timer(0.5, self.track_resources)
+        # Máquina de estados
+        self.estado_actual = 'AVANZANDO'
+        self.arboles_rociados = 0
+        self.meta_arboles = 4
+        self.velocidad_avance = 0.2 # m/s
+        
+        # Tiempos de la rutina
+        self.tiempo_detencion = 5.0  
+        self.tiempo_enfriamiento = 3.0  
+        self.timeout_sin_arbol = 15.0   
 
-    def track_resources(self):
-        ram_mb = self.process.memory_info().rss / (1024 * 1024)
-        cpu_perc = self.process.cpu_percent() 
-        num_threads = self.process.num_threads()
-        self.ram_records.append(ram_mb)
-        self.cpu_records.append(cpu_perc)
-        self.threads_records.append(num_threads)
+        self.tiempo_estado = self.get_clock().now()
+        self.tiempo_ultimo_arbol = self.get_clock().now()
 
-    def print_resource_summary(self):
-        if not self.cpu_records or not self.ram_records:
-            return
+        self.control_timer = self.create_timer(0.05, self.control_loop)
 
-        avg_cpu_perc = sum(self.cpu_records) / len(self.cpu_records)
-        peak_cpu_perc = max(self.cpu_records)
-        avg_cores_used = avg_cpu_perc / 100.0
-        peak_cores_used = peak_cpu_perc / 100.0
-        avg_ram = sum(self.ram_records) / len(self.ram_records)
-        peak_ram = max(self.ram_records)
-        peak_threads = max(self.threads_records)
+    def control_loop(self):
+        msg = Twist()
+        now = self.get_clock().now()
+        tiempo_transcurrido = (now - self.tiempo_estado).nanoseconds / 1e9
 
-        print("\n" + "="*60)
-        print(" RESUMEN DE CONSUMO")
-        print("="*60)
-        print(f" CPU Total:   {self.total_system_cores} núcleos disponibles")
-        print(f" Hilos Activos:    {peak_threads} hilos (Peak en este nodo)")
-        print("-" * 60)
-        print(f" NÚCLEOS USADOS:   {avg_cores_used:.2f} núcleos (Promedio)")
-        print(f" NÚCLEOS USADOS:   {peak_cores_used:.2f} núcleos (Peak)")
-        print(f" Carga bruta CPU:  {avg_cpu_perc:.2f} %")
-        print("-" * 60)
-        print(f" RAM (Promedio):   {avg_ram:.2f} MB")
-        print(f" RAM (Peak):       {peak_ram:.2f} MB")
-        print("="*60 + "\n")
+        if self.estado_actual == 'AVANZANDO':
+            msg.linear.x = self.velocidad_avance
+            # TIMEOUT DE 20s
+            tiempo_sin_ver_arbol = (now - self.tiempo_ultimo_arbol).nanoseconds / 1e9
+            if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
+                self.estado_actual = 'FINALIZADO'
+                self.get_logger().warn(f'{self.timeout_sin_arbol} segundos sin detección. Rutina abortada.')
+            
+        elif self.estado_actual == 'DETENIDO':
+            msg.linear.x = 0.0
+            if tiempo_transcurrido >= self.tiempo_detencion:
+                self.estado_actual = 'ENFRIAMIENTO'
+                self.tiempo_estado = now
+                self.consecutive_detections = 0
+                self.get_logger().info(f'Reanudando. Árboles procesados: {self.arboles_rociados}')
+                
+        elif self.estado_actual == 'ENFRIAMIENTO':
+            msg.linear.x = self.velocidad_avance
+            if tiempo_transcurrido >= self.tiempo_enfriamiento:
+                self.estado_actual = 'AVANZANDO'
+                self.tiempo_ultimo_arbol = now # Reseteamos timeout al volver a escanear
+                
+        elif self.estado_actual == 'FINALIZADO':
+            msg.linear.x = 0.0
+
+        self.cmd_pub.publish(msg)
 
     def scan_callback(self, msg):
         angles = np.linspace(msg.angle_min, msg.angle_max, len(msg.ranges))
@@ -122,13 +110,10 @@ class LidarTreeDetector(Node):
 
         valid_ranges = (ranges > msg.range_min) & (ranges < msg.range_max) & ~np.isinf(ranges) & ~np.isnan(ranges)
         valid_angles = (angles >= self.fov_min) & (angles <= self.fov_max)
-        
         valid = valid_ranges & valid_angles
-        angles = angles[valid]
-        ranges = ranges[valid]
-
-        X = ranges * np.cos(angles)
-        Y = ranges * np.sin(angles)
+        
+        X = ranges[valid] * np.cos(angles[valid])
+        Y = ranges[valid] * np.sin(angles[valid])
         XY = np.column_stack((X, Y))
         
         marker_array = MarkerArray()
@@ -139,57 +124,50 @@ class LidarTreeDetector(Node):
         marker_id = 1
         valid_tree_in_this_scan = False
 
-        # Si hay puntos suficientes, procesar DBSCAN y ajuste
-        if len(XY) >= 4:
+        if self.estado_actual == 'AVANZANDO' and len(XY) >= 4:
             clustering = DBSCAN(eps=0.15, min_samples=4).fit(XY) 
             labels = clustering.labels_ 
             
             for label in set(labels):
-                if label == -1: 
-                    continue 
+                if label == -1: continue 
 
                 cluster_points = XY[labels == label]
-                
                 if 4 <= len(cluster_points) < 80:
                     try:
                         cx, cy, r = circfit_HyperSVD(cluster_points)
+                        # filtro de tamaño
+                        if not (0.07 < r < 0.14): continue
                         
-                        # Filtro de tamaño del tronco (mts)
-                        if not (0.03 < r < 0.05):
-                            continue
-                            
-                        # Validación de ROI
                         dist_to_center = np.hypot(cx, cy)
-                        if not (self.roi_min_dist < dist_to_center < self.roi_max_dist):
-                            continue
-                            
-                        # Validación de Centroide
+                        if not (self.roi_min_dist < dist_to_center < self.roi_max_dist): continue
                         mean_pts_dist = np.mean(np.linalg.norm(cluster_points, axis=1))
-                        if dist_to_center < mean_pts_dist:
-                            continue
+                        if dist_to_center < mean_pts_dist: continue
                             
-                        # Confirmación del clúster actual
                         valid_tree_in_this_scan = True
                         marker = self.create_marker(cx, cy, r, marker_id, msg.header.frame_id)
                         marker_array.markers.append(marker)
                         marker_id += 1
 
-                    except ValueError:
-                        continue 
-                    except Exception as e:
-                        self.get_logger().warn(f"Error: {e}")
+                    except: continue 
 
-        # Actualizacion frames consecutivos
         if valid_tree_in_this_scan:
             self.consecutive_detections += 1
         else:
             self.consecutive_detections = 0 
 
-        # Comando de parada, solo si se cumplen los criterios anteriores
-        stable_tree_detected = (self.consecutive_detections >= self.required_detections)
+        # Transición lógica
+        if self.estado_actual == 'AVANZANDO' and self.consecutive_detections >= self.required_detections:
+            self.arboles_rociados += 1
+            self.tiempo_estado = self.get_clock().now()
+            self.tiempo_ultimo_arbol = self.get_clock().now() # Reseteamos timeout
+            
+            if self.arboles_rociados >= self.meta_arboles:
+                self.estado_actual = 'FINALIZADO'
+                self.get_logger().info(f'{self.meta_arboles} árboles detectados. Rutina finalizada')
+            else:
+                self.estado_actual = 'DETENIDO'
+                self.get_logger().info(f'Tronco {self.arboles_rociados} detectado. Detención por {self.tiempo_detencion}s...')
 
-        print(f"STOP PLATAFORMA: {stable_tree_detected}")
-        
         self.marker_pub.publish(marker_array)
 
     def create_marker(self, x, y, r, m_id, frame_id):
@@ -217,14 +195,11 @@ class LidarTreeDetector(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LidarTreeDetector()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    try: rclpy.spin(node)
+    except KeyboardInterrupt: pass
     finally:
-        node.print_resource_summary()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok(): rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
