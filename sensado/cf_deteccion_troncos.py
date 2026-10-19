@@ -32,12 +32,18 @@ def circfit_HyperSVD(XY):
         Astar = E[:, ID[1]]
         A, _, _, _ = np.linalg.lstsq(W, Astar, rcond=None)
         
-    if np.isclose(A[0], 0): raise ValueError("A[0] es muy cercano a cero")
+    if np.isclose(A[0], 0): 
+        raise ValueError("A[0] es muy cercano a cero")
+
     rad_inner = A[1]**2 + A[2]**2 - 4*A[0]*A[3]
-    if rad_inner <= 0: raise ValueError("Raíz cuadrada negativa")
+
+    if rad_inner <= 0: 
+        raise ValueError("Raíz cuadrada negativa")
+    
     center_x = -(A[1]) / (2 * A[0]) + centroid[0]
     center_y = -(A[2]) / (2 * A[0]) + centroid[1]
     radius = np.sqrt(rad_inner) / (2 * np.abs(A[0]))
+
     return center_x, center_y, radius
 
 
@@ -48,7 +54,7 @@ class LidarTreeDetector(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/tree_markers', 10)
 
-        # CORRECCIÓN DE FALSOS POSITIVOS: Reducimos el FOV a +- 10 grados
+        # CORRECCIÓN DE FALSOS POSITIVOS: Reducir FOV a +- 10 grados
         self.fov_min = np.deg2rad(-10.0) 
         self.fov_max = np.deg2rad(10.0)
         self.roi_min_dist = 0.1
@@ -79,7 +85,7 @@ class LidarTreeDetector(Node):
 
         if self.estado_actual == 'AVANZANDO':
             msg.linear.x = self.velocidad_avance
-            # TIMEOUT DE 20s
+            # Timeout de 15s
             tiempo_sin_ver_arbol = (now - self.tiempo_ultimo_arbol).nanoseconds / 1e9
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
                 self.estado_actual = 'FINALIZADO'
@@ -88,6 +94,7 @@ class LidarTreeDetector(Node):
         elif self.estado_actual == 'DETENIDO':
             msg.linear.x = 0.0
             if tiempo_transcurrido >= self.tiempo_detencion:
+                # Evitar nueva detección del mismo árbol
                 self.estado_actual = 'ENFRIAMIENTO'
                 self.tiempo_estado = now
                 self.consecutive_detections = 0
@@ -97,7 +104,7 @@ class LidarTreeDetector(Node):
             msg.linear.x = self.velocidad_avance
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'
-                self.tiempo_ultimo_arbol = now # Reseteamos timeout al volver a escanear
+                self.tiempo_ultimo_arbol = now # Resetear timeout al volver a escanear
                 
         elif self.estado_actual == 'FINALIZADO':
             msg.linear.x = 0.0
@@ -136,12 +143,17 @@ class LidarTreeDetector(Node):
                     try:
                         cx, cy, r = circfit_HyperSVD(cluster_points)
                         # filtro de tamaño
-                        if not (0.07 < r < 0.14): continue
+                        if not (0.07 < r < 0.14): 
+                            continue
                         
                         dist_to_center = np.hypot(cx, cy)
-                        if not (self.roi_min_dist < dist_to_center < self.roi_max_dist): continue
+
+                        if not (self.roi_min_dist < dist_to_center < self.roi_max_dist): 
+                            continue
                         mean_pts_dist = np.mean(np.linalg.norm(cluster_points, axis=1))
-                        if dist_to_center < mean_pts_dist: continue
+
+                        if dist_to_center < mean_pts_dist: 
+                            continue
                             
                         valid_tree_in_this_scan = True
                         marker = self.create_marker(cx, cy, r, marker_id, msg.header.frame_id)
@@ -159,17 +171,18 @@ class LidarTreeDetector(Node):
         if self.estado_actual == 'AVANZANDO' and self.consecutive_detections >= self.required_detections:
             self.arboles_rociados += 1
             self.tiempo_estado = self.get_clock().now()
-            self.tiempo_ultimo_arbol = self.get_clock().now() # Reseteamos timeout
-            
+            self.tiempo_ultimo_arbol = self.get_clock().now() 
+
             if self.arboles_rociados >= self.meta_arboles:
                 self.estado_actual = 'FINALIZADO'
                 self.get_logger().info(f'{self.meta_arboles} árboles detectados. Rutina finalizada')
             else:
                 self.estado_actual = 'DETENIDO'
-                self.get_logger().info(f'Tronco {self.arboles_rociados} detectado. Detención por {self.tiempo_detencion}s...')
+                self.get_logger().info(f'Tronco {self.arboles_rociados} detectado. Detención por {self.tiempo_detencion}s...') # IMPLEMENTAR MAPIR/BRAZO
 
         self.marker_pub.publish(marker_array)
 
+    # Visualizacion de detección para RViz
     def create_marker(self, x, y, r, m_id, frame_id):
         marker = Marker()
         marker.header.frame_id = frame_id
