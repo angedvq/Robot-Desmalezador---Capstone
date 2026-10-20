@@ -11,6 +11,7 @@ ros2 run rplidar_ros rplidar_node --ros-args -p serial_port:=/dev/ttyUSB0 -p ser
 python3 cf_deteccion_troncos.py
 ```
 
+
 **=== Ejecución MAPIR ===**
 
 **T1**
@@ -21,6 +22,19 @@ python3 mapir_publisher.py
 ```
 python3 procesamiento_nir.py
 ```
+
+
+**=== Ejecución TF-Mini ===**
+
+**T1**
+```
+ros2 run sensado driver_tfmini
+```
+**T2**
+```
+ros2 run sensado procesamiento_tfmini
+```
+
 
 **=== Simulación Rutina de Navegación ===**
 ```
