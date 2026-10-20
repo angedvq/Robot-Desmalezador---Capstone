@@ -35,6 +35,10 @@ ros2 run sensado driver_tfmini
 ros2 run sensado procesamiento_tfmini
 ```
 
+![alt text](tfmini_connection.png "TF-Mini Connection")
+![alt text](rpi4_pin_layout.png "RPi4 Pin Layout")
+
+
 
 **=== Simulación Rutina de Navegación ===**
 ```
