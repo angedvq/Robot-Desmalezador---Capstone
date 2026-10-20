@@ -30,7 +30,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'rutina_navegacion = sensado.cf_deteccion_troncos:main'
+            'procesamiento_lidar = sensado.procesamiento_lidar:main',
+            'procesamiento_tfmini = sensado.procesamiento_tfmini:main',
+            'rutina_navegacion = sensado.rutina_navegacion:main',
+            'driver_tfmini = sensado.driver_tfmini:main'
         ],
     },
 )

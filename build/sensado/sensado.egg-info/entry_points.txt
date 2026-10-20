@@ -1,0 +1,2 @@
+[console_scripts]
+rutina_navegacion = sensado.cf_deteccion_troncos:main

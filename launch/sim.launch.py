@@ -35,17 +35,29 @@ def generate_launch_description():
         output='screen'
     )
 
-    # El nodo Python que contiene la rutina de HyperSVD
-    node_rutina = Node(
+    # --- DEFINICIÓN DE LOS 3 NUEVOS NODOS ---
+    node_percepcion = Node(
+        package='sensado',
+        executable='procesamiento_lidar',
+        output='screen'
+    )
+
+    node_tfmini = Node(
+        package='sensado',
+        executable='procesamiento_tfmini',
+        output='screen'
+    )
+
+    node_navegacion = Node(
         package='sensado',
         executable='rutina_navegacion',
         output='screen'
     )
 
-    # Temporizador vital para evitar el colapso de Gazebo OpenGL
-    delayed_rutina = TimerAction(
-        period=3.0,
-        actions=[node_rutina]
+    # Temporizador vital: Lanza los 3 nodos Python a la vez tras 4 segundos
+    delayed_nodos_python = TimerAction(
+        period=4.0,
+        actions=[node_percepcion, node_tfmini, node_navegacion]
     )
 
     return LaunchDescription([
@@ -65,12 +77,12 @@ def generate_launch_description():
             arguments=[
                 '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
                 '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
-                # --- NUEVA LÍNEA: Puente para enviar los marcadores de ROS a Gazebo ---
-                '/marker@visualization_msgs/msg/Marker@gz.msgs.Marker'
+                '/marker@visualization_msgs/msg/Marker@gz.msgs.Marker',
+                # --- NUEVA LÍNEA: Puente para el TF-Mini ---
+                '/tf_mini/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan'
             ],
             output='screen'
         ),
         
-        # Iniciará 3 segundos DESPUÉS de que Gazebo esté listo
-        delayed_rutina
+        delayed_nodos_python
     ])

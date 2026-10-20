@@ -1,0 +1,175 @@
+<?xml version="1.0"?>
+<robot name="robot_desmalezador" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!-- ============================================== -->
+  <!-- 1. MATERIALES Y COLORES                        -->
+  <!-- ============================================== -->
+  <material name="chasis_color">
+    <color rgba="0.5 0.5 0.5 1"/> <!-- Gris aluminio -->
+  </material>
+  
+  <material name="rueda_color">
+    <color rgba="0.1 0.1 0.1 1"/> <!-- Negro -->
+  </material>
+
+  <material name="lidar_color">
+    <color rgba="0.8 0.1 0.1 1"/> <!-- Rojo oscuro -->
+  </material>
+
+  <!-- ============================================== -->
+  <!-- 2. CHASIS BASE                                 -->
+  <!-- Dimensiones: 40cm largo (x), 30cm ancho (y), 20cm alto (z) -->
+  <!-- ============================================== -->
+  
+  <link name="base_footprint"/>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <!-- Elevamos el chasis para que el eje de las ruedas quede alineado -->
+    <origin xyz="0 0 0.1016" rpy="0 0 0"/> 
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <!-- Centro del chasis un poco más arriba del eje -->
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 0.3 0.2"/>
+      </geometry>
+      <material name="chasis_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.4 0.3 0.2"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="25.0"/>
+      <!-- Inercia aproximada de una caja de masa 25kg -->
+      <inertia ixx="0.2708" ixy="0.0" ixz="0.0" iyy="0.4166" iyz="0.0" izz="0.5208"/>
+    </inertial>
+  </link>
+
+  <!-- ============================================== -->
+  <!-- 3. RUEDAS                                      -->
+  <!-- Ruedas de 10.16 cm de radio (20.32 cm diámetro)-->
+  <!-- Asumimos que están montadas en las esquinas    -->
+  <!-- ============================================== -->
+  
+  <!-- Macro para crear las 4 ruedas fácilmente -->
+  <xacro:macro name="rueda" params="prefix x_reflect y_reflect">
+    <link name="${prefix}_wheel">
+      <visual>
+        <!-- Girar cilindro para que ruede bien -->
+        <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+        <geometry>
+          <cylinder radius="0.1016" length="0.05"/> 
+        </geometry>
+        <material name="rueda_color"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+        <geometry>
+          <cylinder radius="0.1016" length="0.05"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.8"/> <!-- 3.2kg total / 4 ruedas -->
+        <inertia ixx="0.0022" ixy="0" ixz="0" iyy="0.0022" iyz="0" izz="0.0041"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel"/>
+      <!-- x: +- 0.15m (30cm separación entre ejes del/tras), y: +- 0.175m (afuera del chasis 30cm) -->
+      <origin xyz="${x_reflect * 0.15} ${y_reflect * 0.175} 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- Instanciar las 4 ruedas -->
+  <xacro:rueda prefix="front_left"  x_reflect="1"  y_reflect="1" />
+  <xacro:rueda prefix="front_right" x_reflect="1"  y_reflect="-1" />
+  <xacro:rueda prefix="rear_left"   x_reflect="-1" y_reflect="1" />
+  <xacro:rueda prefix="rear_right"  x_reflect="-1" y_reflect="-1" />
+
+  <!-- ============================================== -->
+  <!-- 4. SENSOR LIDAR (RPLIDAR A1)                   -->
+  <!-- ============================================== -->
+  
+  <link name="lidar_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.035" length="0.06"/>
+      </geometry>
+      <material name="lidar_color"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.035" length="0.06"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Montaje del LiDAR: Arriba del chasis, apuntando hacia un lado (-90 grados en yaw) -->
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <!-- Elevado 20cm (techo del chasis) + 3cm. -->
+    <origin xyz="0 0 0.23" rpy="0 0 -1.57079632679"/> 
+  </joint>
+
+  <!-- ============================================== -->
+  <!-- 5. PLUGINS DE GAZEBO                           -->
+  <!-- ============================================== -->
+  
+  <!-- Plugin Skid Steer Drive (Para robot de 4 ruedas) -->
+  <!-- Plugin de Movimiento (Diff Drive / Skid Steer en Gazebo Fortress) -->
+  <gazebo>
+    <plugin filename="ignition-gazebo-diff-drive-system" name="ignition::gazebo::systems::DiffDrive">
+      <!-- Ruedas izquierdas y derechas -->
+      <left_joint>front_left_wheel_joint</left_joint>
+      <left_joint>rear_left_wheel_joint</left_joint>
+      <right_joint>front_right_wheel_joint</right_joint>
+      <right_joint>rear_right_wheel_joint</right_joint>
+
+      <wheel_separation>0.35</wheel_separation>
+      <wheel_radius>0.1016</wheel_radius>
+
+      <topic>/cmd_vel</topic>
+      <odom_topic>/odom</odom_topic>
+      <tf_topic>/tf</tf_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+    </plugin>
+  </gazebo>
+
+  <!-- Plugin del RPLiDAR en Gazebo Fortress -->
+  <gazebo reference="lidar_link">
+    <sensor type="gpu_lidar" name="rplidar_sensor">
+      <topic>/scan</topic>
+      <update_rate>10</update_rate>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.5235987</min_angle>
+            <max_angle>0.5235987</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.15</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </lidar>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
+</robot>

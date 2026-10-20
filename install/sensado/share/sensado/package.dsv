@@ -1,0 +1,6 @@
+source;share/sensado/hook/pythonpath.ps1
+source;share/sensado/hook/pythonpath.dsv
+source;share/sensado/hook/pythonpath.sh
+source;share/sensado/hook/ament_prefix_path.ps1
+source;share/sensado/hook/ament_prefix_path.dsv
+source;share/sensado/hook/ament_prefix_path.sh

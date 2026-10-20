@@ -172,4 +172,48 @@
     </sensor>
   </gazebo>
 
+  <!-- ============================================== -->
+  <!-- 6. TF-MINI (SENSOR DE DISTANCIA FRONTAL)       -->
+  <!-- ============================================== -->
+  <link name="tfmini_link">
+    <visual>
+      <geometry><box size="0.02 0.02 0.02"/></geometry>
+      <material name="lidar_color"/>
+    </visual>
+  </link>
+
+  <joint name="tfmini_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tfmini_link"/>
+    <!-- CAMBIO: x = 0.21 para que sobresalga de la caja de colisión del chasis (que mide 0.4 total, es decir +-0.2) -->
+    <origin xyz="0.21 0 0.15" rpy="0 0 0"/> 
+  </joint>
+
+  <gazebo reference="tfmini_link">
+    <!-- En Ignition Fortress usamos gpu_lidar para garantizar que el rayo choque bien con mallas -->
+    <sensor type="gpu_lidar" name="tfmini_sensor">
+      <!-- Asegurarnos de que el tópico base sea limpio -->
+      <topic>/tf_mini/scan</topic>
+      <update_rate>20</update_rate>
+      <lidar>
+        <scan>
+          <horizontal>
+            <!-- 3 rayos muy juntos simulando un haz concentrado para evitar que pase por agujeros en la malla -->
+            <samples>3</samples>
+            <resolution>1</resolution>
+            <min_angle>-0.01</min_angle>
+            <max_angle>0.01</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.02</min> <!-- Reducimos el mínimo para evitar -inf si algo toca el chasis -->
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </lidar>
+      <always_on>1</always_on>
+      <visualize>true</visualize>
+    </sensor>
+  </gazebo>
+
 </robot>
