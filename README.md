@@ -35,8 +35,10 @@ ros2 run sensado driver_tfmini
 ros2 run sensado procesamiento_tfmini
 ```
 
-**Conexiones TF-Mini to RPi4**
-<img src="tfmini_connection.png" alt="TF-Mini Connections" width="500"/>
+<figure>
+  <img src="tfmini_connection.png" alt="TF-Mini Connections" width="500">
+  <figcaption>Conexiones TF-Mini to RPi4</figcaption>
+</figure>
 
 
 
