@@ -127,7 +127,7 @@ class PercepcionTroncos(Node):
         else:
             self.consecutive_detections = 0 
 
-        # Comunicación al nodo de control mediante PoseArray
+        # Comunicación al nodo de control 
         pose_array_msg = PoseArray()
         pose_array_msg.header.frame_id = msg.header.frame_id
         pose_array_msg.header.stamp = self.get_clock().now().to_msg()

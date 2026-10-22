@@ -78,7 +78,6 @@ def generate_launch_description():
                 '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
                 '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
                 '/marker@visualization_msgs/msg/Marker@gz.msgs.Marker',
-                # --- NUEVA LÍNEA: Puente para el TF-Mini ---
                 '/tf_mini/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan'
             ],
             output='screen'

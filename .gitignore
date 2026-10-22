@@ -1,0 +1,17 @@
+# Directorios de compilación e instalación de ROS 2
+build/
+install/
+log/
+
+# Carpetas de tests y cachés de Python
+test/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Archivos de configuración de IDEs y editores
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

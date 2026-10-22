@@ -17,6 +17,7 @@ class TFMiniDetector(Node):
         obstaculo.data = False
         
         for r in msg.ranges:
+
             # Ignoramos +infinito (espacio completamente despejado) y NaNs
             if np.isposinf(r) or np.isnan(r):
                 continue
@@ -24,9 +25,14 @@ class TFMiniDetector(Node):
             # Si hay un obstáculo a menos de 50cm o el sensor está cegado (-inf)
             if r < self.distancia_frenado:
                 obstaculo.data = True
-                print(f"Obstáculo detectado a {self.distancia_frenado} cms")
-                break
                 
+                break
+            
+        if obstaculo.data:
+            print(f"Obstáculo a {self.distancia_frenado} cms")
+        else:
+            print(False)
+            
         self.pub.publish(obstaculo)
 
 def main(args=None):
