@@ -1,14 +1,16 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseArray
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 class ControlNavegacion(Node):
     def __init__(self):
         super().__init__('control_navegacion')
         
-        # Publicador de velocidad
+        # Publicador de movimiento y actuadores
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.bomba_pub = self.create_publisher(Bool, '/bomba', 10)
+        self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
         
         # Suscriptores
         self.tree_sub = self.create_subscription(PoseArray, '/arboles_detectados', self.tree_callback, 10)
@@ -21,6 +23,7 @@ class ControlNavegacion(Node):
         self.velocidad_avance = 0.2
         self.obstaculo_detectado = False
         self.arbol_en_mira = False
+        self.actuadores_desplegados = False
         
         # Tiempos 
         self.tiempo_detencion = 5.0
@@ -45,6 +48,23 @@ class ControlNavegacion(Node):
         # Si el arreglo de poses tiene al menos un elemento, hay un árbol confirmado enfrente
         self.arbol_en_mira = len(msg.poses) > 0
 
+    def accionar_actuadores_dummy(self, encender:bool):
+        """Función auxiliar para enviar las señales a los actuadores no conectados."""
+        msg_bomba = Bool()
+        msg_brazo = Float32()
+        
+        if encender:
+            msg_bomba.data = True
+            msg_brazo.data = 50.0  # Dummy: Desplegar brazo 50 mm
+            self.actuadores_desplegados = True
+        else:
+            msg_bomba.data = False
+            msg_brazo.data = 0.0   # Dummy: Retraer brazo a 0 mm
+            self.actuadores_desplegados = False
+            
+        self.bomba_pub.publish(msg_bomba)
+        self.brazo_pub.publish(msg_brazo)
+
     def control_loop(self):
         msg = Twist()
         now = self.get_clock().now()
@@ -56,6 +76,10 @@ class ControlNavegacion(Node):
                 self.tiempo_transcurrido_guardado = (now - self.tiempo_estado).nanoseconds / 1e9
                 self.tiempo_sin_ver_arbol_guardado = (now - self.tiempo_ultimo_arbol).nanoseconds / 1e9
                 self.en_pausa_por_obstaculo = True
+
+                # Detener actuadores
+                if self.actuadores_desplegados:
+                    self.accionar_actuadores_dummy(encender=False)
                 
             msg.linear.x = 0.0
             self.cmd_pub.publish(msg)
@@ -67,6 +91,11 @@ class ControlNavegacion(Node):
                 self.tiempo_estado = now - rclpy.time.Duration(nanoseconds=int(self.tiempo_transcurrido_guardado * 1e9))
                 self.tiempo_ultimo_arbol = now - rclpy.time.Duration(nanoseconds=int(self.tiempo_sin_ver_arbol_guardado * 1e9))
                 self.en_pausa_por_obstaculo = False
+                
+                # Accionar actuadores
+                if self.estado_actual == 'DETENIDO':
+                    self.accionar_actuadores_dummy(encender=True)
+
                 self.get_logger().warn('Ruta despejada. Reanudando...')
 
         # Cálculo de tiempos reales en movimiento
@@ -88,10 +117,14 @@ class ControlNavegacion(Node):
                 
                 self.estado_actual = 'DETENIDO'
                 self.get_logger().info(f'Árbol {self.arboles_rociados} detectado. Rociando por {self.tiempo_detencion}s...')
+
+                self.accionar_actuadores_dummy(encender=True)
             
         elif self.estado_actual == 'DETENIDO':
             msg.linear.x = 0.0
             if tiempo_transcurrido >= self.tiempo_detencion:
+                self.get_logger().info("Apagando bomba y brazo")
+
                 # Al terminar el rociado, comprobamos si era el último árbol 
                 if self.arboles_rociados >= self.meta_arboles:
                     self.estado_actual = 'FINALIZADO'
@@ -110,6 +143,9 @@ class ControlNavegacion(Node):
                 
         elif self.estado_actual == 'FINALIZADO':
             msg.linear.x = 0.0
+
+            if self.actuadores_desplegados:
+                self.accionar_actuadores_dummy(encender=False)
 
         self.cmd_pub.publish(msg)
 

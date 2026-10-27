@@ -29,7 +29,7 @@ class TFMiniDetector(Node):
                 break
             
         if obstaculo.data:
-            print(f"Obstáculo a {self.distancia_frenado} cms")
+            print(f"Obstáculo a {self.distancia_frenado} mts")
         else:
             print(False)
             
