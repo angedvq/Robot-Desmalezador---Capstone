@@ -7,10 +7,12 @@ import numpy as np
 class TFMiniDetector(Node):
     def __init__(self):
         super().__init__('tf_mini_detector')
+        self.declare_parameter('distancia_frenado', 0.5)
         self.sub = self.create_subscription(LaserScan, '/tf_mini/scan', self.scan_callback, 10)
         self.pub = self.create_publisher(Bool, '/obstaculo_frontal', 10)
         
-        self.distancia_frenado = 0.5 
+        self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
+        self.en_obstaculo = False
 
     def scan_callback(self, msg):
         obstaculo = Bool()
@@ -22,16 +24,20 @@ class TFMiniDetector(Node):
             if np.isposinf(r) or np.isnan(r):
                 continue
                 
-            # Si hay un obstáculo a menos de 50cm o el sensor está cegado (-inf)
+            # Si hay un obstáculo a menos de 50cm o el sensor está cegado (0.01 / -inf)
             if r < self.distancia_frenado:
                 obstaculo.data = True
-                
                 break
             
         if obstaculo.data:
-            print(f"Obstáculo a {self.distancia_frenado} mts")
-        else:
-            print(False)
+            self.en_obstaculo = True
+            self.get_logger().warn(
+                f"Obstáculo frontal detectado (< {self.distancia_frenado:.2f} m)",
+                throttle_duration_sec=2.0
+            )
+        elif self.en_obstaculo:
+            self.en_obstaculo = False
+            self.get_logger().info("Ruta frontal despejada.")
             
         self.pub.publish(obstaculo)
 

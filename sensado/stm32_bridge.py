@@ -21,11 +21,11 @@ def trama(orden, valor=0.0):
 class STM32Bridge(Node):
     def __init__(self):
         super().__init__('stm32_bridge')
-        # Por defecto usa los pines GPIO TX/RX de la RPi4 (/dev/serial0)
-        self.declare_parameter('port', '/dev/serial0')
+        self.declare_parameter('port', '/dev/ttyAMA1')
         self.uart = serial.Serial(self.get_parameter('port').value, 115200)
 
         self.velocidad = 0.0
+        self.ultima_vel_enviada = 0.0
         self.ultimo_cmd = 0.0
         self.bomba_encendida = False
         
@@ -71,8 +71,16 @@ class STM32Bridge(Node):
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] != 5)
                 self.pendientes.appendleft((6, 0))
 
+        # Prioridad de frenado: si se pide velocidad 0 mientras el robot avanzaba,
+        # descartar giros en cola y enviar detención inmediata sin esperar a vaciar pendientes.
+        if self.velocidad == 0.0 and self.ultima_vel_enviada != 0.0:
+            self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] != 1)
+            self.pendientes.appendleft((0, 0.0))
+
         orden, valor = (self.pendientes.popleft() if self.pendientes
                         else (0, self.velocidad))
+        if orden == 0:
+            self.ultima_vel_enviada = valor
         
         try:
             self.uart.write(trama(orden, valor))
@@ -80,10 +88,13 @@ class STM32Bridge(Node):
             self.get_logger().error(f"Error UART: {e}")
 
     def cerrar(self):
-        self.uart.write(trama(0, 0))
-        time.sleep(0.02)
-        self.uart.write(trama(6, 0))
-        self.uart.close()
+        try:
+            self.uart.write(trama(0, 0))
+            time.sleep(0.02)
+            self.uart.write(trama(6, 0))
+            self.uart.close()
+        except Exception:
+            pass
 
 
 def main(args=None):
@@ -98,7 +109,8 @@ def main(args=None):
         if nodo is not None:
             nodo.cerrar()
             nodo.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
