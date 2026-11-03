@@ -1,8 +1,10 @@
-import pygame, time
-import serial, struct
+import pygame
+import time
+import serial
+import struct
 
 # Init
-ser = serial.Serial("/dev/ttyAMA1", 115200)
+ser = serial.Serial("COM10", 115200)
 
 
 def enviar(orden, valor):
@@ -20,37 +22,46 @@ def joystick():
     pygame.joystick.init()
 
     js = pygame.joystick.Joystick(0)
-    print(f"Dispositivo: {js.get_name()} | ejes: {js.get_numaxes()} | botones: {js.get_numbuttons()}")
 
     while True:
         pygame.event.pump()
 
-        eje_x = round(js.get_axis(0) * (-1/0.6), 1) * 180
+        eje_x = round(js.get_axis(0), 1)
+        if abs(eje_x) < 0.1:
+            eje_x = 0
+        enviar(1, eje_x * 180)
 
-        print(f"Eje x: {eje_x}")
-        enviar(1, eje_x)
+        eje_y = round(js.get_axis(1), 1)
+        if abs(eje_y) < 0.1:
+            eje_y = 0
+        enviar(0, eje_y * -0.369)
 
-        eje_y = round(js.get_axis(1) * (-1 / 0.66), 1) * 0.369
+        print(f"{eje_x} - {eje_y}")
 
-        print(f"Eje y: {eje_y}")
-        enviar(0, eje_y)
+        hx, hy = js.get_hat(0)
+        if hx == 1:
+            enviar(5, -100)
+            print("Derecha")
 
-        time.sleep(0.01)
+        if hx == -1:
+            enviar(5, 100)
+            print("Izquierda")
 
+        if hy == -1:
+            enviar(6, 0)
+            print("Abajo")
 
-def debug():
-    while True:
-        valor = float(input("Ingresar valor:"))
+        a = js.get_button(0)
+        if a == 1:
+            enviar(7, 0)
+            print("boton A")
 
-        eje_x = valor * 180
+        b = js.get_button(1)
+        if b == 1:
+            enviar(8,  0)
+            print("boton B")
 
-        print(f"Eje x: {eje_x}")
-        enviar(1, eje_x)
-
-        eje_y = valor * 0.369
-
-        print(f"Eje y: {eje_y}")
-        enviar(0, eje_y)
+        time.sleep(0.1)
 
 
 joystick()
