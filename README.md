@@ -40,7 +40,9 @@ ros2 run sensado procesamiento_tfmini
   <img src="tfmini_connection.png" alt="TF-Mini Connections" width="500">
 </figure>
 
-
+**STM32 Connection**
+A3 (naranjo) to Pin24
+A2 (rojo) to Pin21
 
 **=== Simulación Rutina de Navegación ===**
 ```
