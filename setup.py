@@ -32,8 +32,15 @@ setup(
         'console_scripts': [
             'procesamiento_lidar = sensado.procesamiento_lidar:main',
             'procesamiento_tfmini = sensado.procesamiento_tfmini:main',
+            'procesamiento_nir = sensado.procesamiento_nir:main',
             'rutina_navegacion = sensado.rutina_navegacion:main',
-            'driver_tfmini = sensado.driver_tfmini:main'
+            'driver_tfmini = sensado.driver_tfmini:main',
+            'driver_mapir = sensado.driver_mapir:main',
+            'stm32_bridge = sensado.stm32_bridge:main',
+            'test_pared = sensado.test_pared:main',
+            'control_pared_sim = sensado.control_pared_sim:main',
+            'real_test_pared = sensado.real_test_pared:main',
+            'real_control_pared = sensado.real_control_pared:main',
         ],
     },
 )
