@@ -60,7 +60,7 @@ class RealLidarParedLateral(Node):
 
         self.declare_parameter('fov_min_deg', -120.0)
         self.declare_parameter('fov_max_deg', -60.0)
-        self.declare_parameter('max_wall_range', 2.5)
+        self.declare_parameter('max_wall_range', 3.0)
 
         self.fov_min = np.deg2rad(float(self.get_parameter('fov_min_deg').value))
         self.fov_max = np.deg2rad(float(self.get_parameter('fov_max_deg').value))

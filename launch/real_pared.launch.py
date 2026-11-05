@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -12,6 +13,8 @@ def generate_launch_description():
     distancia_frenado = LaunchConfiguration('distancia_frenado')
     velocidad_avance = LaunchConfiguration('velocidad_avance')
     kp = LaunchConfiguration('kp')
+    max_grados = LaunchConfiguration('max_grados')
+    usar_tfmini = LaunchConfiguration('usar_tfmini')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -31,7 +34,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.50',
+            default_value='0.70',
             description='Distancia objetivo a la pared izquierda en metros'
         ),
         DeclareLaunchArgument(
@@ -46,8 +49,18 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'kp',
-            default_value='100.0',
-            description='Ganancia proporcional rumbo/distancia (grados por metro)'
+            default_value='35.0',
+            description='Ganancia proporcional suave rumbo/distancia (grados por metro)'
+        ),
+        DeclareLaunchArgument(
+            'max_grados',
+            default_value='12.0',
+            description='Corrección angular máxima permitida en grados'
+        ),
+        DeclareLaunchArgument(
+            'usar_tfmini',
+            default_value='true',
+            description='Habilitar sensor frontal TF-Mini (true/false)'
         ),
 
         # 1. Driver oficial RPLidar A1 (orientación por defecto: motor/+X hacia atrás del robot)
@@ -75,12 +88,13 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 3. Driver y detector del sensor frontal TF-Mini
+        # 3. Driver y detector del sensor frontal TF-Mini (condicional a usar_tfmini)
         Node(
             package='sensado',
             executable='driver_tfmini',
             name='tfmini_driver',
             parameters=[{'port': tfmini_port}],
+            condition=IfCondition(usar_tfmini),
             output='screen'
         ),
         Node(
@@ -88,10 +102,11 @@ def generate_launch_description():
             executable='procesamiento_tfmini',
             name='tf_mini_detector',
             parameters=[{'distancia_frenado': distancia_frenado}],
+            condition=IfCondition(usar_tfmini),
             output='screen'
         ),
 
-        # 4. Puente UART hacia STM32
+        # 4. Puente UART hacia STM32 (Protocolo V2 con soporte STOP_All / START_Mov / START_Tracking)
         Node(
             package='sensado',
             executable='stm32_bridge',
@@ -100,7 +115,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 5. Controlador autónomo de seguimiento de pared con watchdogs y frenado
+        # 5. Controlador autónomo suave de seguimiento de pared con watchdogs y comando STOP
         Node(
             package='sensado',
             executable='real_control_pared',
@@ -110,6 +125,8 @@ def generate_launch_description():
                 'distancia_frenado': distancia_frenado,
                 'velocidad_avance': velocidad_avance,
                 'kp': kp,
+                'max_grados': max_grados,
+                'usar_tfmini': usar_tfmini,
             }],
             output='screen'
         ),
