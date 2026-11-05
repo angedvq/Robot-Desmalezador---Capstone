@@ -12,13 +12,17 @@ class RealControlPared(Node):
     def __init__(self):
         super().__init__('real_control_pared')
 
-        # Parámetros ajustables por launch / CLI (SSH)
+        # Parámetros de seguimiento suave de pared + evasión rápida de pilares/salientes
         self.declare_parameter('distancia_meta', 0.70)
         self.declare_parameter('distancia_frenado', 0.50)
         self.declare_parameter('velocidad_avance', 0.20)
         self.declare_parameter('kp', 35.0)
+        self.declare_parameter('kp_evasion', 75.0)
         self.declare_parameter('max_grados', 12.0)
+        self.declare_parameter('max_grados_evasion', 25.0)
         self.declare_parameter('slew_rate_deg_s', 6.0)
+        self.declare_parameter('slew_evasion_deg_s', 30.0)
+        self.declare_parameter('umbral_evasion', 0.12)
         self.declare_parameter('alpha_dist', 0.35)
         self.declare_parameter('usar_tfmini', True)
         self.declare_parameter('lidar_timeout', 0.8)
@@ -28,8 +32,12 @@ class RealControlPared(Node):
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
         self.kp = float(self.get_parameter('kp').value)
+        self.kp_evasion = float(self.get_parameter('kp_evasion').value)
         self.max_grados = float(self.get_parameter('max_grados').value)
+        self.max_grados_evasion = float(self.get_parameter('max_grados_evasion').value)
         self.slew_rate_deg_s = float(self.get_parameter('slew_rate_deg_s').value)
+        self.slew_evasion_deg_s = float(self.get_parameter('slew_evasion_deg_s').value)
+        self.umbral_evasion = float(self.get_parameter('umbral_evasion').value)
         self.alpha_dist = float(self.get_parameter('alpha_dist').value)
         self.usar_tfmini = bool(self.get_parameter('usar_tfmini').value)
         self.lidar_timeout = float(self.get_parameter('lidar_timeout').value)
@@ -51,7 +59,7 @@ class RealControlPared(Node):
         self.pub_stop = self.create_publisher(Bool, '/navegacion/stop', 10)
         self.pub_grados = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
 
-        # El rumbo por defecto arranca siempre en 0.0° y cambia de forma progresiva
+        # El rumbo por defecto arranca siempre en 0.0°
         self.distancia_actual = None
         self.rumbo_suavizado = 0.0
         self.ultimo_rumbo_enviado = 0.0
@@ -71,8 +79,8 @@ class RealControlPared(Node):
 
         self.get_logger().info(
             f"real_control_pared iniciado | meta={self.distancia_meta:.2f}m, "
-            f"vel={self.velocidad_avance:.2f}m/s, kp={self.kp:.1f}, max={self.max_grados:.1f}°, "
-            f"frenado={self.distancia_frenado:.2f}m, usar_tfmini={self.usar_tfmini}"
+            f"suave=(kp={self.kp:.0f}, max={self.max_grados:.0f}°), "
+            f"evasion=(kp={self.kp_evasion:.0f}, max={self.max_grados_evasion:.0f}°)"
         )
 
     def dist_callback(self, msg):
@@ -80,7 +88,11 @@ class RealControlPared(Node):
             nueva = float(msg.data)
             if self.distancia_actual is None:
                 self.distancia_actual = nueva
+            elif nueva < (self.distancia_actual - 0.08):
+                # Caída repentina de distancia (ej. pilar o escalón): respuesta rápida sin rezago
+                self.distancia_actual = 0.80 * nueva + 0.20 * self.distancia_actual
             else:
+                # Seguimiento normal / retorno a la pared: filtrado suave
                 self.distancia_actual = (
                     self.alpha_dist * nueva + (1.0 - self.alpha_dist) * self.distancia_actual
                 )
@@ -101,7 +113,6 @@ class RealControlPared(Node):
         self.obstaculo_scan = detectado
 
     def detener_robot(self):
-        # Enviar orden explícita de STOP_All al puente STM32 además de velocidad 0
         msg_stop_flag = Bool()
         msg_stop_flag.data = True
         self.pub_stop.publish(msg_stop_flag)
@@ -111,13 +122,12 @@ class RealControlPared(Node):
         msg_stop_vel.angular.z = 0.0
         self.pub_vel.publish(msg_stop_vel)
 
-        # Reiniciar rampa suave a 0.0° para no retomar con un giro brusco
         self.rumbo_suavizado = 0.0
 
     def control_loop(self):
         now = time.monotonic()
 
-        # 1. Watchdogs de sensores: detener con STOP_All si falta LiDAR (o TF-Mini cuando está activo)
+        # 1. Watchdogs de sensores
         lidar_ok = (
             self.ultimo_lidar_ts is not None
             and (now - self.ultimo_lidar_ts) <= self.lidar_timeout
@@ -147,7 +157,7 @@ class RealControlPared(Node):
             self.en_pausa_por_watchdog = False
             self.get_logger().info("Sensores operativos. Control autónomo habilitado (rumbo base 0.0°).")
 
-        # 2. Detección de obstáculo frontal -> enviar comando STOP completo a la STM32
+        # 2. Detección de obstáculo frontal -> STOP_All inmediato
         if self.usar_tfmini and (self.obstaculo_topic or self.obstaculo_scan):
             if not self.en_pausa_por_obstaculo:
                 self.en_pausa_por_obstaculo = True
@@ -161,30 +171,35 @@ class RealControlPared(Node):
             self.en_pausa_por_obstaculo = False
             self.get_logger().info("Ruta despejada. Reanudando movimiento...")
 
-        # Liberar bandera de STOP para permitir avance
         msg_run = Bool()
         msg_run.data = False
         self.pub_stop.publish(msg_run)
 
-        # 3. Error suave respecto a la pared IZQUIERDA (meta por defecto = 0.70 m)
+        # 3. Cálculo asimétrico de rumbo:
+        # - Seguimiento normal / retorno a la pared: suave (kp=35, máx +12°)
+        # - Pilar / intrusión cercana (error < -umbral_evasion): evasión agresiva (kp=75, máx -25°)
         error = self.distancia_actual - self.distancia_meta
+        en_evasion = error < -self.umbral_evasion
 
-        # Zona muerta de +-3 cm donde la referencia objetivo es exactamente 0.0°
         if abs(error) < 0.03:
             rumbo_objetivo = 0.0
+        elif en_evasion:
+            rumbo_objetivo = max(-self.max_grados_evasion, error * self.kp_evasion)
         else:
-            rumbo_objetivo = error * self.kp
-            rumbo_objetivo = max(-self.max_grados, min(self.max_grados, rumbo_objetivo))
+            rumbo_objetivo = max(-self.max_grados, min(self.max_grados, error * self.kp))
 
-        # 4. Rampa progresiva (slew-rate limit) partiendo desde 0.0° para evitar giros bruscos
-        max_paso = self.slew_rate_deg_s * self.dt
+        # 4. Rampa asimétrica: rápida al abrirse para esquivar un pilar, suave al volver a la pared
+        abriendose_por_peligro = en_evasion and (rumbo_objetivo < self.rumbo_suavizado)
+        tasa_deg_s = self.slew_evasion_deg_s if abriendose_por_peligro else self.slew_rate_deg_s
+        max_paso = tasa_deg_s * self.dt
+
         delta = rumbo_objetivo - self.rumbo_suavizado
         if abs(delta) <= max_paso:
             self.rumbo_suavizado = rumbo_objetivo
         else:
             self.rumbo_suavizado += math.copysign(max_paso, delta)
 
-        # 5. Publicar SET_HeadingRef (en pasos suaves de >= 0.5°, retorno a 0.0° o refresco de 1s)
+        # 5. Publicar SET_HeadingRef
         diferencia_angular = abs(self.rumbo_suavizado - self.ultimo_rumbo_enviado)
         retorno_a_cero = (self.rumbo_suavizado == 0.0 and self.ultimo_rumbo_enviado != 0.0)
         requiere_refresco = (now - self.ultimo_envio_grados_ts) >= 1.0
@@ -195,8 +210,9 @@ class RealControlPared(Node):
             self.pub_grados.publish(msg_grados)
 
             if diferencia_angular >= 0.5 or retorno_a_cero:
+                modo = "EVASION" if abriendose_por_peligro else "SUAVE"
                 self.get_logger().info(
-                    f"Dist: {self.distancia_actual:.2f}m -> SET_Heading: {self.rumbo_suavizado:.1f}° "
+                    f"[{modo}] Dist: {self.distancia_actual:.2f}m -> SET_Heading: {self.rumbo_suavizado:.1f}° "
                     f"(obj: {rumbo_objetivo:.1f}°)"
                 )
             self.ultimo_rumbo_enviado = self.rumbo_suavizado

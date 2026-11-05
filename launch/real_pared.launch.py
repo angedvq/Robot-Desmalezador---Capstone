@@ -14,6 +14,7 @@ def generate_launch_description():
     velocidad_avance = LaunchConfiguration('velocidad_avance')
     kp = LaunchConfiguration('kp')
     max_grados = LaunchConfiguration('max_grados')
+    max_grados_evasion = LaunchConfiguration('max_grados_evasion')
     usar_tfmini = LaunchConfiguration('usar_tfmini')
 
     return LaunchDescription([
@@ -55,7 +56,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_grados',
             default_value='12.0',
-            description='Corrección angular máxima permitida en grados'
+            description='Corrección angular máxima suave en grados'
+        ),
+        DeclareLaunchArgument(
+            'max_grados_evasion',
+            default_value='25.0',
+            description='Corrección angular máxima de evasión ante pilares/salientes en grados'
         ),
         DeclareLaunchArgument(
             'usar_tfmini',
@@ -126,6 +132,7 @@ def generate_launch_description():
                 'velocidad_avance': velocidad_avance,
                 'kp': kp,
                 'max_grados': max_grados,
+                'max_grados_evasion': max_grados_evasion,
                 'usar_tfmini': usar_tfmini,
             }],
             output='screen'
