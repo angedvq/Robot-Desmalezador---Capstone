@@ -19,7 +19,7 @@ class RealControlPared(Node):
         self.declare_parameter('kp', 35.0)
         self.declare_parameter('kp_evasion', 75.0)
         self.declare_parameter('max_grados', 12.0)
-        self.declare_parameter('max_grados_evasion', 25.0)
+        self.declare_parameter('max_grados_evasion', 100.0)
         self.declare_parameter('slew_rate_deg_s', 6.0)
         self.declare_parameter('slew_evasion_deg_s', 30.0)
         self.declare_parameter('umbral_evasion', 0.12)
