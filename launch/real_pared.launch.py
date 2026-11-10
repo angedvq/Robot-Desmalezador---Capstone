@@ -69,7 +69,7 @@ def generate_launch_description():
             description='Habilitar sensor frontal TF-Mini (true/false)'
         ),
 
-        # 1. Driver oficial RPLidar A1 (orientación por defecto: motor/+X hacia atrás del robot)
+        # Driver RPLidar A1 
         Node(
             package='rplidar_ros',
             executable='rplidar_node',
@@ -86,7 +86,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 2. Percepción de distancia perpendicular a la pared izquierda
+        # Percepción de distancia perpendicular a la pared izquierda
         Node(
             package='sensado',
             executable='real_test_pared',
@@ -94,7 +94,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 3. Driver y detector del sensor frontal TF-Mini (condicional a usar_tfmini)
+        # Driver y detector del TF-Mini
         Node(
             package='sensado',
             executable='driver_tfmini',
@@ -112,7 +112,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 4. Puente UART hacia STM32 (Protocolo V2 con soporte STOP_All / START_Mov / START_Tracking)
+        # Puente UART hacia STM32 
         Node(
             package='sensado',
             executable='stm32_bridge',
@@ -121,7 +121,7 @@ def generate_launch_description():
             output='screen'
         ),
 
-        # 5. Controlador autónomo suave de seguimiento de pared con watchdogs y comando STOP
+        # Controlador autónomo de seguimiento de pared
         Node(
             package='sensado',
             executable='real_control_pared',

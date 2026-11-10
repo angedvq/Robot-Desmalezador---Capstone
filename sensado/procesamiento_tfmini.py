@@ -24,7 +24,7 @@ class TFMiniDetector(Node):
             if np.isposinf(r) or np.isnan(r):
                 continue
                 
-            # Si hay un obstáculo a menos de 50cm o el sensor está cegado (0.01 / -inf)
+            # Si hay un obstáculo a menos de 50cm o el sensor está cegado 
             if r < self.distancia_frenado:
                 obstaculo.data = True
                 break

@@ -8,7 +8,7 @@ def parse_tfmini_distance(pkt, ultima_dist_valida=float('inf')):
     dist_cm = pkt[2] | (pkt[3] << 8)
     strength = pkt[4] | (pkt[5] << 8)
 
-    # 1. Saturación o zona ciega a quemarropa (< 10 cm):
+    # Saturación o zona ciega (< 10 cm):
     # - 65534 (-2): saturación de señal reportada por firmware TFmini/TFmini-S
     # - strength == 65535 o >= 1000 con lectura inválida (0 o >= 65532): lente tapado / muy cerca
     # - 0 < dist_cm <= 10: objeto pegado al sensor
@@ -22,11 +22,11 @@ def parse_tfmini_distance(pkt, ultima_dist_valida=float('inf')):
     ):
         return 0.01, 0.01
 
-    # 2. Espacio despejado (> 12 m) o eco demasiado débil sin saturación:
+    # Espacio despejado (> 12 m) o eco demasiado débil sin saturación:
     if dist_cm == 0 or dist_cm >= 1200 or strength < 20:
         return float('inf'), float('inf')
 
-    # 3. Lectura normal válida (0.11 m a 11.99 m)
+    # Lectura normal válida 
     distancia_m = dist_cm / 100.0
     return distancia_m, distancia_m
 
@@ -83,7 +83,7 @@ class TFMiniDriver(Node):
             self.ser = None
             return
 
-        # Buscar la trama válida (cabecera 0x59 0x59 + checksum) más reciente en el buffer
+        # Buscar la trama válida más reciente en el buffer
         ultimo_pkt = None
         consumido = 0
         i = 0
