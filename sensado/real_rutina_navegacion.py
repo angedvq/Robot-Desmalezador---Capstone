@@ -30,10 +30,10 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 20.0)    
         self.declare_parameter('tiempo_delay_brazo', 1.0)    
-        self.declare_parameter('tiempo_brazo_extendido', 4.0) 
-        self.declare_parameter('tiempo_brazo_retraido', 3.0)  
+        self.declare_parameter('tiempo_brazo_extendido', 8.0) 
+        self.declare_parameter('tiempo_brazo_retraido', 8.0)  
         self.declare_parameter('tiempo_enfriamiento', 3.0)    # Ceguera temporal para avanzar a sgte tronco (s)
-        self.declare_parameter('desplazamiento_brazo_mm', 200.0)  # +200 mm (+20 cm) extiende, -200 mm retrae REVISAR
+        self.declare_parameter('desplazamiento_brazo_mm', 410.0)  # +200 mm (+20 cm) extiende, -200 mm retrae REVISAR
 
         # Watchdogs de sensores reales
         self.declare_parameter('usar_tfmini', True)
