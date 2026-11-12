@@ -1,4 +1,36 @@
 #!/usr/bin/env python3
+"""
+real_stm32_bridge_v2: misma lógica de envío que real_stm32_bridge, con la
+recepción reescrita.
+
+Protocolo STM32 -> RPi: tramas de 2 bytes (uint8 cada uno)
+    [codigo, codigo ^ 0xA5]
+
+Problemas del receptor anterior que se corrigen aquí:
+  1. Eco de las propias tramas TX (4 bytes). Si el UART tiene loopback / eco
+     (TX y RX puenteados, adaptador half-duplex o la STM reenviando lo que
+     recibe), por RX llegan de vuelta las tramas de 4 bytes que manda la RPi.
+     El parser viejo las recorría byte a byte y podía confundir pedazos de
+     ellas con mensajes válidos, p. ej.:
+        trama(SET_HEADING, 0.01) = 01 01 00 A5  -> "00 A5" = Error comunicación
+        trama(SET_HEADING, 1.64) = 01 A4 00 ..  -> "01 A4" = Caída de voltaje
+     Ahora se reconocen las tramas propias enviadas recientemente y se descartan
+     completas (4 bytes) antes de buscar mensajes de la STM32.
+  2. Los bytes descartados se perdían en silencio (y el print() inundaba la
+     consola). Ahora se acumulan y se reportan en hexadecimal, con throttle,
+     para ver exactamente qué está llegando.
+  3. Mensajes duplicados (la STM enviando la misma trama 2 veces = 4 bytes)
+     se filtran con una ventana de tiempo configurable.
+  4. La lectura del UART corre en su propio timer (200 Hz), independiente del
+     envío a 20 Hz.
+
+Parámetros:
+  port               (str)   puerto serie                 [/dev/ttyAMA1]
+  baudrate           (int)                                [115200]
+  filtrar_eco        (bool)  descarta eco de tramas TX    [True]
+  ventana_duplicado  (float) s, ignora mismo código repetido dentro de esta ventana [0.15]
+  debug_rx           (bool)  imprime en hex todo lo que llega por RX [False]
+"""
 import struct
 import time
 from collections import deque
@@ -10,25 +42,27 @@ from std_msgs.msg import Bool, Float32, Int32
 import serial
 
 # =============================================================================
-# Códigos de orden 
+# Códigos de orden RPi -> STM32 (tramas de 4 bytes: [orden, int16 LE, chk])
 # =============================================================================
+SET_VEL = 0
+SET_HEADING = 1
+RESET_TRACKING = 2
+START_TRACKING = 3
+STOP_TRACKING = 4
+MOVE_STEPPER = 5
+STOP_STEPPER = 6
+START_BOMBA = 7
+STOP_BOMBA = 8
+STOP_ALL = 9
+START_MOV = 10
+STOP_MOV = 11
 
-SET_VEL = 0         # Fija velocidad de avance de referencia (m/s)
-SET_HEADING = 1     # Fija rumbo objetivo del robot (grados, rango +-180°)
-RESET_TRACKING = 2  # Reinicia el tracking de la IMU
-START_TRACKING = 3  # Enciende la IMU y empieza a medir sin borrar referencia 0°
-STOP_TRACKING = 4   # Apaga la IMU para no integrar deriva mientras está detenido
-MOVE_STEPPER = 5    # Mueve el brazo stepper (desplazamiento en cm: + extiende, - retrae)
-STOP_STEPPER = 6    # Detiene el stepper inmediatamente
-START_BOMBA = 7     # Enciende la bomba
-STOP_BOMBA = 8      # Apaga la bomba
-STOP_ALL = 9        # Detiene todo: ruedas, stepper y bomba
-START_MOV = 10      # Inicia movimiento (m/s), fija rumbo actual como 0° y enciende IMU
-STOP_MOV = 11       # Detiene solo las ruedas, mantiene rumbo actual y apaga IMU
-
-# Códigos recibidos desde la STM32 (2 bytes: [codigo, codigo ^ 0xA5])
-BRAZO_RETRAIDO = 3   # Brazo totalmente retraído (Brazo home)
-BRAZO_EXTENDIDO = 4  # Brazo totalmente extendido (Brazo end)
+# =============================================================================
+# Códigos STM32 -> RPi (tramas de 2 bytes: [codigo, codigo ^ 0xA5])
+# =============================================================================
+CHK_XOR = 0xA5
+BRAZO_RETRAIDO = 3
+BRAZO_EXTENDIDO = 4
 
 MENSAJES_STM32 = {
     0: "Error de comunicación",
@@ -40,26 +74,158 @@ MENSAJES_STM32 = {
 
 
 def trama(orden: int, valor: float = 0.0) -> bytes:
-    '''Convierte una orden y un numero decimal en un paquete de 4 bytes segun el protocolo de comunicacion'''
+    """Orden + valor decimal -> paquete de 4 bytes [orden, int16 LE (valor*100), chk]."""
     raw = max(-32767, min(32767, round(float(valor) * 100.0)))
     cuerpo = struct.pack('<Bh', int(orden), int(raw))
-    chk = cuerpo[0] ^ cuerpo[1] ^ cuerpo[2] ^ 0xA5
+    chk = cuerpo[0] ^ cuerpo[1] ^ cuerpo[2] ^ CHK_XOR
     return cuerpo + bytes([chk])
 
 
-class RealSTM32Bridge(Node):
+def hexstr(data) -> str:
+    return ' '.join(f'{b:02X}' for b in data)
+
+
+# =============================================================================
+# Parser de recepción (sin dependencias de ROS, testeable por separado)
+# =============================================================================
+class ReceptorSTM32:
+    """
+    Máquina de sincronización para tramas de 2 bytes [codigo, codigo ^ 0xA5].
+
+    - Si filtrar_eco=True, cualquier trama TX (4 bytes) enviada hace menos de
+      `ventana_eco` s que aparezca al inicio del buffer se descarta completa.
+    - Si el buffer contiene sólo el comienzo de una posible trama eco, espera
+      hasta `espera_parcial` s a que lleguen los bytes restantes antes de
+      intentar interpretarlo como mensaje de la STM32.
+    - Todo byte que no forme una trama válida se acumula en `basura`.
+    """
+
+    LARGO_TX = 4
+    LARGO_RX = 2
+
+    def __init__(self, codigos_validos, filtrar_eco=True,
+                 ventana_eco=0.5, espera_parcial=0.02):
+        self.codigos = set(codigos_validos)
+        self.filtrar_eco = filtrar_eco
+        self.ventana_eco = ventana_eco
+        self.espera_parcial = espera_parcial
+
+        self.buf = bytearray()
+        self.tx_recientes = deque()  # (timestamp, bytes)
+        self._t_parcial = None
+
+        # Estadísticas / diagnóstico
+        self.basura = bytearray()
+        self.n_validos = 0
+        self.n_ecos = 0
+        self.n_basura = 0
+
+    def registrar_tx(self, frame: bytes, t: float):
+        if self.filtrar_eco:
+            self.tx_recientes.append((t, bytes(frame)))
+            self._purgar_tx(t)
+
+    def _purgar_tx(self, t: float):
+        while self.tx_recientes and (t - self.tx_recientes[0][0]) > self.ventana_eco:
+            self.tx_recientes.popleft()
+        # Límite duro por si el timer TX corre y no llega nada
+        while len(self.tx_recientes) > 64:
+            self.tx_recientes.popleft()
+
+    def _estado_eco(self):
+        """'eco' si el buffer empieza con una trama TX reciente, 'parcial' si
+        podría serlo pero faltan bytes, None si no."""
+        cabeza = bytes(self.buf[:self.LARGO_TX])
+        parcial = False
+        for i, (_, frame) in enumerate(self.tx_recientes):
+            if len(cabeza) >= self.LARGO_TX:
+                if cabeza == frame:
+                    # Cada trama enviada produce a lo más un eco
+                    del self.tx_recientes[i]
+                    return 'eco'
+            elif frame.startswith(cabeza):
+                parcial = True
+        return 'parcial' if parcial else None
+
+    def alimentar(self, data: bytes, t: float):
+        """Agrega bytes recibidos y devuelve la lista de códigos válidos."""
+        if data:
+            self.buf.extend(data)
+        self._purgar_tx(t)
+
+        codigos = []
+        while len(self.buf) >= self.LARGO_RX:
+            if self.filtrar_eco and self.tx_recientes:
+                estado = self._estado_eco()
+                if estado == 'eco':
+                    del self.buf[:self.LARGO_TX]
+                    self.n_ecos += 1
+                    self._t_parcial = None
+                    continue
+                if estado == 'parcial':
+                    if self._t_parcial is None:
+                        self._t_parcial = t
+                    if (t - self._t_parcial) < self.espera_parcial:
+                        break  # esperar bytes restantes del posible eco
+                self._t_parcial = None
+
+            b0, b1 = self.buf[0], self.buf[1]
+            if b0 in self.codigos and b1 == (b0 ^ CHK_XOR):
+                codigos.append(b0)
+                self.n_validos += 1
+                del self.buf[:self.LARGO_RX]
+            else:
+                self.basura.append(b0)
+                self.n_basura += 1
+                del self.buf[:1]
+
+        # Evita crecer sin límite si llega ruido continuo
+        if len(self.basura) > 256:
+            del self.basura[:-256]
+        return codigos
+
+    def sacar_basura(self) -> bytes:
+        out = bytes(self.basura)
+        self.basura.clear()
+        return out
+
+
+# =============================================================================
+# Nodo ROS
+# =============================================================================
+class RealSTM32BridgeV2(Node):
     def __init__(self):
         super().__init__('real_stm32_bridge')
 
         self.declare_parameter('port', '/dev/ttyAMA1')
         self.declare_parameter('baudrate', 115200)
+        self.declare_parameter('filtrar_eco', True)
+        self.declare_parameter('ventana_duplicado', 0.15)
+        self.declare_parameter('debug_rx', False)
 
         port = str(self.get_parameter('port').value)
         baudrate = int(self.get_parameter('baudrate').value)
-        self.uart = serial.Serial(port, baudrate, timeout=0.0)
+        filtrar_eco = bool(self.get_parameter('filtrar_eco').value)
+        self.ventana_duplicado = float(self.get_parameter('ventana_duplicado').value)
+        self.debug_rx = bool(self.get_parameter('debug_rx').value)
 
-        # Buffer de recepción para tramas de error 
-        self.rx_buf = bytearray()
+        self.uart = serial.Serial(
+            port, baudrate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.0,
+        )
+        # Descarta lo que haya quedado en el buffer del kernel de una sesión anterior
+        try:
+            self.uart.reset_input_buffer()
+        except Exception:
+            pass
+
+        self.rx = ReceptorSTM32(MENSAJES_STM32.keys(), filtrar_eco=filtrar_eco)
+        self._ultimo_codigo = None
+        self._t_ultimo_codigo = 0.0
+        self._t_reporte_basura = 0.0
 
         # Estado interno
         self.velocidad = 0.0
@@ -70,81 +236,64 @@ class RealSTM32Bridge(Node):
         self.en_movimiento = False
         self.primer_arranque = True
 
-        # Cola FIFO de órdenes pendientes prioritarias
-        # Al iniciar el nodo, nos aseguramos de que todo esté detenido y la IMU quede inicializada en 0.0°.
-        # deque() permite enviar tareas de forma consecutiva y ordenada para no saturar el puerto serial
         self.pendientes = deque([
             (STOP_ALL, 0.0),
             (RESET_TRACKING, 0.0),
             (SET_HEADING, 0.0),
         ])
 
-        # Suscriptores 
+        # Suscriptores
         self.create_subscription(Twist, '/cmd_vel', self.recibir_velocidad, 10)
         self.create_subscription(Bool, '/navegacion/stop', self.recibir_stop, 10)
         self.create_subscription(Float32, '/navegacion/corregir_grados', self.recibir_correccion, 10)
         self.create_subscription(Bool, '/bomba', self.recibir_bomba, 10)
         self.create_subscription(Float32, '/brazo_mm', self.recibir_brazo, 10)
 
-        # Publicador de confirmaciones del brazo desde la STM32 (3 = retraído, 4 = extendido)
+        # Publicadores
         self.pub_estado_brazo = self.create_publisher(Int32, '/stm32/estado_brazo', 10)
+        self.pub_mensaje = self.create_publisher(Int32, '/stm32/mensaje', 10)
 
-        self.create_timer(0.05, self.enviar_pendiente) 
+        # Timers: RX a 200 Hz, TX a 20 Hz (mismo executor -> sin carreras)
+        self.create_timer(0.005, self.leer_uart)
+        self.create_timer(0.05, self.enviar_pendiente)
 
         self.get_logger().info(
-            f"real_stm32_bridge iniciado en {port} ({baudrate} bps) | "
-            "Soporte STOP_Mov (árboles/brazo) + STOP_All (emergencia)"
+            f"real_stm32_bridge_v2 iniciado en {port} ({baudrate} bps, 8N1) | "
+            f"filtrar_eco={filtrar_eco} ventana_duplicado={self.ventana_duplicado}s "
+            f"debug_rx={self.debug_rx}"
         )
 
     # =========================================================================
     # Callbacks
     # =========================================================================
     def recibir_velocidad(self, msg: Twist):
-        """Actualiza la velocidad lineal de referencia recibida en /cmd_vel."""
         self.velocidad = float(msg.linear.x)
         self.ultimo_cmd = time.monotonic()
 
     def recibir_stop(self, msg: Bool):
-        """Recibe bandera de parada total /navegacion/stop"""
         nuevo_stop = bool(msg.data)
         self.ultimo_cmd = time.monotonic()
-
-        # Si se activa el STOP de emergencia, encolar STOP_All al frente
         if nuevo_stop and not self.stop_solicitado:
             self.velocidad = 0.0
             self.en_movimiento = False
             self.pendientes.clear()
             self.pendientes.appendleft((STOP_ALL, 0.0))
-
         self.stop_solicitado = nuevo_stop
 
     def recibir_correccion(self, msg: Float32):
-        """ Recibe el rumbo objetivo desde /navegacion/corregir_grados"""
-
-        # max de 180° para no saturar
         self.ultimo_rumbo = max(-180.0, min(180.0, float(msg.data)))
         self.ultimo_cmd = time.monotonic()
-
         if self.en_movimiento and not self.stop_solicitado:
             self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
 
     def recibir_bomba(self, msg: Bool):
-        """Enciende o apaga la bomba (falta implementar la MAPIR)"""
         self.bomba_encendida = bool(msg.data)
         self.ultimo_cmd = time.monotonic()
         self.pendientes.append((START_BOMBA if self.bomba_encendida else STOP_BOMBA, 0.0))
 
     def recibir_brazo(self, msg: Float32):
-        """
-        Recibe orden de movimiento del brazo desde /brazo_mm y la convierte a centímetros 
-        - Valor positivo (+X mm -> +X/10 cm): Extiende el brazo hasta fin de carrera.
-        - Valor negativo (-X mm -> -X/10 cm): Retrae el brazo hasta fin de carrera.
-        - Valor 0.0: Envía `STOP_Stepper` (Orden 6).
-        """
         self.ultimo_cmd = time.monotonic()
         desplazamiento_mm = float(msg.data)
-
-        # Si el valor de extension del brazo se acerca a 0, abortar movimiento
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
         else:
@@ -156,111 +305,106 @@ class RealSTM32Bridge(Node):
             )
 
     # =========================================================================
-    # Lectura de mensajes y diagnósticos enviados por la STM32
+    # Recepción STM32 -> RPi
     # =========================================================================
-    def _leer_mensajes_stm32(self):
-        """
-        Lee paquetes de 2 bytes enviados desde la STM32 ([codigo, codigo ^ 0xA5]):
-        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All internamente).
-        - 3: Brazo totalmente retraído (Brazo home).
-        - 4: Brazo totalmente extendido (Brazo end).
-        """
+    def leer_uart(self):
+        ahora = time.monotonic()
+        data = b''
         try:
-            waiting = self.uart.in_waiting
-            if waiting > 0:
-                self.rx_buf.extend(self.uart.read(waiting))
-        except Exception:
+            n = self.uart.in_waiting
+            if n > 0:
+                data = self.uart.read(n)
+        except Exception as e:
+            self.get_logger().error(f"Error leyendo UART STM32: {e}",
+                                    throttle_duration_sec=2.0)
             return
 
-        while len(self.rx_buf) >= 2:
-            b0, b1 = self.rx_buf[0], self.rx_buf[1]
-            print(b0,b1)
-            if (b0 ^ 0xA5) == b1 and b0 in MENSAJES_STM32:
-                if b0 in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
-                    self.get_logger().info(
-                        f"[STM32 -> RPi] Mensaje ({b0}): {MENSAJES_STM32[b0]}"
-                    )
-                    msg_brazo = Int32()
-                    msg_brazo.data = int(b0)
-                    self.pub_estado_brazo.publish(msg_brazo)
-                else:
-                    self.get_logger().error(
-                        f"[STM32 -> RPi] Error ({b0}): {MENSAJES_STM32[b0]} (STOP_All)"
-                    )
-                del self.rx_buf[:2]
-                #print(b0)
-            else:
-                del self.rx_buf[:1]
-                #print("error catastrofico")
+        if data and self.debug_rx:
+            self.get_logger().info(f"[RX raw] {len(data)} B: {hexstr(data)}")
+
+        for codigo in self.rx.alimentar(data, ahora):
+            self._procesar_codigo(codigo, ahora)
+
+        # Reporte de bytes descartados (máx. 1 vez por segundo)
+        if self.rx.basura and (ahora - self._t_reporte_basura) > 1.0:
+            self._t_reporte_basura = ahora
+            self.get_logger().warn(
+                f"[RX] Bytes descartados (no forman trama [cod, cod^0xA5]): "
+                f"{hexstr(self.rx.sacar_basura())} | "
+                f"válidos={self.rx.n_validos} ecos={self.rx.n_ecos} basura={self.rx.n_basura}"
+            )
+
+    def _procesar_codigo(self, codigo: int, ahora: float):
+        # Filtra la misma trama repetida (p. ej. STM enviándola 2 veces)
+        if (codigo == self._ultimo_codigo
+                and (ahora - self._t_ultimo_codigo) < self.ventana_duplicado):
+            self._t_ultimo_codigo = ahora
+            return
+        self._ultimo_codigo = codigo
+        self._t_ultimo_codigo = ahora
+
+        msg = Int32()
+        msg.data = int(codigo)
+        self.pub_mensaje.publish(msg)
+
+        print(codigo)
+        if codigo in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
+            self.get_logger().info(f"[STM32 -> RPi] ({codigo}) {MENSAJES_STM32[codigo]}")
+            self.pub_estado_brazo.publish(msg)
+        else:
+            self.get_logger().error(
+                f"[STM32 -> RPi] Error ({codigo}): {MENSAJES_STM32[codigo]} (STOP_All)"
+            )
 
     # =========================================================================
-    # Loop principal
+    # Envío RPi -> STM32 (misma lógica que real_stm32_bridge)
     # =========================================================================
+    def _escribir(self, orden: int, valor: float):
+        frame = trama(orden, valor)
+        self.uart.write(frame)
+        self.rx.registrar_tx(frame, time.monotonic())
+
     def enviar_pendiente(self):
-        self._leer_mensajes_stm32()
-
-        # Watchdog: Si dejan de llegar comandos de ROS (> 0.5 s), detener todo
         sin_comandos = (self.ultimo_cmd > 0.0 and (time.monotonic() - self.ultimo_cmd) > 0.6)
-
         if sin_comandos:
             self.velocidad = 0.0
             self.stop_solicitado = True
 
-        # ---------------------------------------------------------------------
-        # Parada total por obstáculo, fin o watchdog
-        # ---------------------------------------------------------------------
         if self.stop_solicitado:
             if self.en_movimiento:
                 self.en_movimiento = False
                 self.pendientes.clear()
                 self.pendientes.appendleft((STOP_ALL, 0.0))
-
             orden, valor = (self.pendientes.popleft() if self.pendientes else (STOP_ALL, 0.0))
 
-        # ---------------------------------------------------------------------
-        # Parada de movimiento frente un árbol
-        # ---------------------------------------------------------------------
         elif abs(self.velocidad) < 1e-4:
             if self.en_movimiento:
                 self.en_movimiento = False
-
-                # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
                 ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-
-                # Detener las ruedas y pausar IMU con STOP_Mov
                 self.pendientes.appendleft((STOP_MOV, 0.0))
-
-            # Si hay órdenes en cola las enviamos; si la cola está vacía, mantenemos STOP_Mov
             orden, valor = (self.pendientes.popleft() if self.pendientes else (STOP_MOV, 0.0))
 
-        # ---------------------------------------------------------------------
-        # Robot avanzando hacia el siguiente árbol
-        # ---------------------------------------------------------------------
         else:
             if not self.en_movimiento:
                 self.en_movimiento = True
                 if self.primer_arranque:
-                    # Primer arranque del recorrido: fija 0° paralelo a la hilera y enciende IMU
                     self.primer_arranque = False
                     self.pendientes.append((START_MOV, self.velocidad))
                     if abs(self.ultimo_rumbo) >= 0.01:
                         self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
                 else:
-                    # Reanudación tras árbol u obstáculo: conserva la referencia 0° original
                     self.pendientes.append((START_TRACKING, 0.0))
                     self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
                     self.pendientes.append((SET_VEL, self.velocidad))
-
             orden, valor = (self.pendientes.popleft() if self.pendientes else (SET_VEL, self.velocidad))
 
         try:
-            self.uart.write(trama(orden, valor))
+            self._escribir(orden, valor)
         except Exception as e:
             self.get_logger().error(f"Error escribiendo en UART STM32: {e}")
 
     def cerrar(self):
-        """Detiene todos los actuadores y cierra el puerto serial al apagar el nodo."""
         try:
             self.uart.write(trama(STOP_ALL, 0.0))
             time.sleep(0.02)
@@ -273,7 +417,7 @@ def main(args=None):
     rclpy.init(args=args)
     nodo = None
     try:
-        nodo = RealSTM32Bridge()
+        nodo = RealSTM32BridgeV2()
         rclpy.spin(nodo)
     except KeyboardInterrupt:
         pass
