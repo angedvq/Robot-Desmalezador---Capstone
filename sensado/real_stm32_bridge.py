@@ -174,6 +174,7 @@ class RealSTM32Bridge(Node):
 
         while len(self.rx_buf) >= 2:
             b0, b1 = self.rx_buf[0], self.rx_buf[1]
+            print(b0,b1)
             if (b0 ^ 0xA5) == b1 and b0 in MENSAJES_STM32:
                 if b0 in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
                     self.get_logger().info(
@@ -187,10 +188,10 @@ class RealSTM32Bridge(Node):
                         f"[STM32 -> RPi] Error ({b0}): {MENSAJES_STM32[b0]} (STOP_All)"
                     )
                 del self.rx_buf[:2]
-                print(b0)
+                #print(b0)
             else:
                 del self.rx_buf[:1]
-                print("error catastrofico")
+                #print("error catastrofico")
 
     # =========================================================================
     # Loop principal
