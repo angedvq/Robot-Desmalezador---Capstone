@@ -30,6 +30,8 @@ ERRORES_STM32 = {
     0: "Error de comunicación",
     1: "Caída de voltaje",
     2: "Fallo bomba",
+    3: "Brazo home",
+    4: "Brazo end"
 }
 
 
@@ -135,15 +137,6 @@ class RealSTM32Bridge(Node):
         self.ultimo_cmd = time.monotonic()
         desplazamiento_mm = float(msg.data)
 
-        # Si las ruedas seguían en movimiento al llegar la orden de brazo,
-        # asegurar que STOP_Mov se envíe ANTES que MOVE_Stepper
-        if self.en_movimiento:
-            self.velocidad = 0.0
-            self.en_movimiento = False
-            ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
-            self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-            self.pendientes.appendleft((STOP_MOV, 0.0))
-
         # Si el valor de extension del brazo se acerca a 0, abortar movimiento
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
@@ -175,7 +168,8 @@ class RealSTM32Bridge(Node):
                 )
                 del self.rx_buf[:2]
             else:
-                del self.rx_buf[:1]
+                #del self.rx_buf[:1]
+                print(ERRORES_STM32[b0])
 
     # =========================================================================
     # Loop principal
