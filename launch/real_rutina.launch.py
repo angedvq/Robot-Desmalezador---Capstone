@@ -67,22 +67,22 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'tiempo_delay_brazo',
-            default_value='1.0',
+            default_value='1.5',
             description='Delay de avance tras detección LiDAR para alinear el brazo trasero (s)',
         ),
         DeclareLaunchArgument(
             'tiempo_brazo_extendido',
-            default_value='4.0',
+            default_value='8.0',
             description='Tiempo que el brazo permanece extendido frente al tronco (s)',
         ),
         DeclareLaunchArgument(
             'tiempo_brazo_retraido',
-            default_value='3.0',
+            default_value='8.0',
             description='Tiempo de espera para retracción del brazo antes de avanzar (s)',
         ),
         DeclareLaunchArgument(
             'desplazamiento_brazo_mm',
-            default_value='200.0',
+            default_value='410.0',
             description='Magnitud enviada a /brazo_mm (+X extiende, -X retrae)',
         ),
         DeclareLaunchArgument(

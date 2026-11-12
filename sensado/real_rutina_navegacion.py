@@ -29,7 +29,7 @@ class RealRutinaNavegacion(Node):
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 20.0)    
-        self.declare_parameter('tiempo_delay_brazo', 1.0)    
+        self.declare_parameter('tiempo_delay_brazo', 1.5)    
         self.declare_parameter('tiempo_brazo_extendido', 8.0) 
         self.declare_parameter('tiempo_brazo_retraido', 8.0)  
         self.declare_parameter('tiempo_enfriamiento', 3.0)    # Ceguera temporal para avanzar a sgte tronco (s)
@@ -37,8 +37,8 @@ class RealRutinaNavegacion(Node):
 
         # Watchdogs de sensores reales
         self.declare_parameter('usar_tfmini', True)
-        self.declare_parameter('lidar_timeout', 1.0)
-        self.declare_parameter('tfmini_timeout', 0.8)
+        self.declare_parameter('lidar_timeout', 2.0)
+        self.declare_parameter('tfmini_timeout', 2.0)
 
         # Lectura de parámetros
         self.distancia_meta = float(self.get_parameter('distancia_meta').value)
@@ -72,6 +72,7 @@ class RealRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         # Suscriptores de percepción
         # ---------------------------------------------------------------------
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_watchdog_callback, 10)
         self.tree_sub = self.create_subscription(PoseArray, '/arboles_detectados', self.tree_callback, 10)
         self.dist_sub = self.create_subscription(Float32, '/lidar/distancia_tronco_lateral', self.dist_tronco_callback, 10)
         self.obs_sub = self.create_subscription(Bool, '/obstaculo_frontal', self.obs_callback, 10)
@@ -114,12 +115,18 @@ class RealRutinaNavegacion(Node):
         self.get_logger().info(
             f"real_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
             f"Distancia hilera: {self.distancia_meta:.2f}m | Delay brazo: {self.tiempo_delay_brazo:.1f}s | "
+            f"Extensión: {self.tiempo_brazo_extendido:.1f}s | Retracción: {self.tiempo_brazo_retraido:.1f}s | "
+            f"Recorrido brazo: {self.desplazamiento_brazo_mm / 10.0:.1f}cm | "
             f"Timeout sin árbol: {self.timeout_sin_arbol:.0f}s"
         )
 
     # =========================================================================
     # Callbacks
     # =========================================================================
+    def scan_watchdog_callback(self, _msg: LaserScan):
+        """Monitorea directamente /scan para el watchdog del RPLidar."""
+        self.ultimo_lidar_ts = time.monotonic()
+
     def tree_callback(self, msg: PoseArray):
         """Recibe las detecciones de troncos en la ventana lateral"""
         self.ultimo_lidar_ts = time.monotonic()
@@ -281,11 +288,14 @@ class RealRutinaNavegacion(Node):
             return
 
         # Verificación de Watchdogs de Sensores. Revisa si pasó mucho tiempo desde la ultima recepcion de datos de sensores
+        operando_brazo_detenido = self.estado_actual in ('EXTENDIENDO_BRAZO', 'RETRAYENDO_BRAZO')
         lidar_ok = (self.ultimo_lidar_ts is not None and (now - self.ultimo_lidar_ts) <= self.lidar_timeout)
         tfmini_ok = ((not self.usar_tfmini) or (self.ultimo_tfmini_ts is not None and (now - self.ultimo_tfmini_ts) <= self.tfmini_timeout))
 
-        # Si algun sensor no está funcionando, freno de emergencia
-        if not lidar_ok or not tfmini_ok:
+        # Si algun sensor no está funcionando mientras el robot se desplaza, freno de emergencia.
+        # Nota: Si ya está detenido accionando el brazo, no enviamos STOP_All por un parpadeo
+        # de sensor para no cortar el recorrido del motor stepper a mitad de camino.
+        if (not lidar_ok or not tfmini_ok) and not operando_brazo_detenido:
             if not self.en_pausa_por_watchdog:
                 self._pausar_relojes(now)
                 self.en_pausa_por_watchdog = True
@@ -303,16 +313,20 @@ class RealRutinaNavegacion(Node):
             return
 
         # Si todo esta ok, quitar la pausa
-        elif self.en_pausa_por_watchdog:
+        elif self.en_pausa_por_watchdog and lidar_ok and tfmini_ok:
             self._restaurar_relojes(now)
             self.en_pausa_por_watchdog = False
             self.get_logger().info("Sensores ok. Iniciando/reanudando rutina de árboles")
+            if self.estado_actual == 'EXTENDIENDO_BRAZO':
+                self.comandar_brazo('EXTENDER')
+            elif self.estado_actual == 'RETRAYENDO_BRAZO':
+                self.comandar_brazo('RETRAER')
 
         # ---------------------------------------------------------------------
-        # Obstáculo Frontal
+        # Obstáculo Frontal (solo detiene cuando el robot pretende avanzar)
         # ---------------------------------------------------------------------
         hay_obstaculo = self.usar_tfmini and (self.obstaculo_topic or self.obstaculo_scan)
-        if hay_obstaculo:
+        if hay_obstaculo and not operando_brazo_detenido:
             if not self.en_pausa_por_obstaculo:
                 self._pausar_relojes(now)
                 self.en_pausa_por_obstaculo = True
@@ -325,7 +339,7 @@ class RealRutinaNavegacion(Node):
             return
 
         # Continuar ruta
-        elif self.en_pausa_por_obstaculo:
+        elif self.en_pausa_por_obstaculo and not hay_obstaculo:
             self._restaurar_relojes(now)
             self.en_pausa_por_obstaculo = False
             self.get_logger().info("Ruta despejada. Reanudando...")
@@ -371,39 +385,43 @@ class RealRutinaNavegacion(Node):
                 self.tiempo_ultimo_arbol = now
                 self.estado_actual = 'ALINEANDO_BRAZO'
                 self.get_logger().info(
-                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado"
+                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
                     f"Alineando brazo por {self.tiempo_delay_brazo:.1f}s"
                 )
 
         elif self.estado_actual == 'ALINEANDO_BRAZO':
-            # Sigue avanzando durante 1.0 s para que el brazo quede alineado frente al tronco detectado
-            msg_vel.linear.x = self.velocidad_avance
-            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
-
-            if tiempo_transcurrido >= self.tiempo_delay_brazo:
+            # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
+            if tiempo_transcurrido < self.tiempo_delay_brazo:
+                msg_vel.linear.x = self.velocidad_avance
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            else:
+                # Primero publicamos velocidad 0.0 (STOP_Mov) y luego accionamos el brazo (MOVE_Stepper)
                 msg_vel.linear.x = 0.0
+                self.cmd_pub.publish(msg_vel)
                 self.estado_actual = 'EXTENDIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
                     f"Brazo alineado con tronco {self.arboles_procesados}. "
-                    f"Deteniendo ruedas y accionando brazo por {self.tiempo_brazo_extendido:.1f}s..."
+                    f"Deteniendo ruedas y extendiendo brazo por {self.tiempo_brazo_extendido:.1f}s..."
                 )
                 self.comandar_brazo('EXTENDER')
+                return
 
         elif self.estado_actual == 'EXTENDIENDO_BRAZO':
-            # Ruedas detenidas, brazo extendiéndose/extendido
+            # Ruedas detenidas, brazo extendiéndose/extendido durante tiempo_brazo_extendido
             msg_vel.linear.x = 0.0
 
             if tiempo_transcurrido >= self.tiempo_brazo_extendido:
                 self.estado_actual = 'RETRAYENDO_BRAZO'
                 self.tiempo_inicio_estado = now
-                self.comandar_brazo('RETRAER')
                 self.get_logger().info(
-                    f"Retrayendo brazo por {self.tiempo_brazo_retraido:.1f}s"
+                    f"Extensión completada ({tiempo_transcurrido:.1f}s). "
+                    f"Retrayendo brazo por {self.tiempo_brazo_retraido:.1f}s..."
                 )
+                self.comandar_brazo('RETRAER')
 
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
-            # Ruedas detenidas mientras el brazo termina de contraerse
+            # Ruedas detenidas mientras el brazo termina de contraerse durante tiempo_brazo_retraido
             msg_vel.linear.x = 0.0
 
             if tiempo_transcurrido >= self.tiempo_brazo_retraido:
@@ -411,8 +429,8 @@ class RealRutinaNavegacion(Node):
                     self.estado_actual = 'FINALIZADO'
                     self.detener_todo_emergencia()
                     self.get_logger().info(
-                        f"Meta alcanzada. {self.arboles_procesados}/{self.meta_arboles} árboles procesados"
-                        "Brazo retraído y robot detenido por completo"
+                        f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles procesados). "
+                        "Brazo retraído y robot detenido por completo."
                     )
                     return
                 else:
@@ -420,7 +438,7 @@ class RealRutinaNavegacion(Node):
                     self.tiempo_inicio_estado = now
                     self.tiempo_ultimo_arbol = now
                     self.get_logger().info(
-                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado. "
+                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado ({tiempo_transcurrido:.1f}s retracción). "
                         f"Reanudando marcha (enfriamiento de {self.tiempo_enfriamiento:.1f}s)..."
                     )
 
@@ -434,7 +452,7 @@ class RealRutinaNavegacion(Node):
                 self.tiempo_inicio_estado = now
                 self.tiempo_ultimo_arbol = now
                 self.get_logger().info(
-                    f"Buscando árbol {self.arboles_procesados + 1}/{self.meta_arboles} "
+                    f"Buscando árbol {self.arboles_procesados + 1}/{self.meta_arboles}..."
                 )
 
         self.cmd_pub.publish(msg_vel)
@@ -448,7 +466,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.detener_todo_emergencia()
+        if rclpy.ok():
+            node.detener_todo_emergencia()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

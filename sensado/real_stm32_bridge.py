@@ -135,12 +135,21 @@ class RealSTM32Bridge(Node):
         self.ultimo_cmd = time.monotonic()
         desplazamiento_mm = float(msg.data)
 
+        # Si las ruedas seguían en movimiento al llegar la orden de brazo,
+        # asegurar que STOP_Mov se envíe ANTES que MOVE_Stepper
+        if self.en_movimiento:
+            self.velocidad = 0.0
+            self.en_movimiento = False
+            ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
+            self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
+            self.pendientes.appendleft((STOP_MOV, 0.0))
+
         # Si el valor de extension del brazo se acerca a 0, abortar movimiento
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
         else:
             desplazamiento_cm = desplazamiento_mm / 10.0
-            self.pendientes.append((MOVE_STEPPER, desplazamiento_cm)) # REVISAR COMO LA STM32 MANEJA LA ORDEN DEL BRAZO
+            self.pendientes.append((MOVE_STEPPER, desplazamiento_cm))
             accion = "EXTENDER" if desplazamiento_cm > 0.0 else "RETRAER"
             self.get_logger().info(
                 f"Orden brazo añadida: {accion} (MOVE_Stepper = {desplazamiento_cm:+.1f} cm)"
