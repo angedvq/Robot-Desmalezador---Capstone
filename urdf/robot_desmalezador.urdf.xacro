@@ -1,13 +1,13 @@
 <?xml version="1.0"?>
 <robot name="robot_desmalezador" xmlns:xacro="http://ros.org/wiki/xacro">
 
-  <!-- ============================================== -->
-  <!-- 1. MATERIALES Y COLORES                        -->
-  <!-- ============================================== -->
+  <!-- ==================================================================== -->
+  <!-- 1. MATERIALES Y COLORES                                              -->
+  <!-- ==================================================================== -->
   <material name="chasis_color">
     <color rgba="0.5 0.5 0.5 1"/> <!-- Gris aluminio -->
   </material>
-  
+
   <material name="rueda_color">
     <color rgba="0.1 0.1 0.1 1"/> <!-- Negro -->
   </material>
@@ -16,23 +16,30 @@
     <color rgba="0.8 0.1 0.1 1"/> <!-- Rojo oscuro -->
   </material>
 
-  <!-- ============================================== -->
-  <!-- 2. CHASIS BASE                                 -->
-  <!-- Dimensiones: 40cm largo (x), 30cm ancho (y), 20cm alto (z) -->
-  <!-- ============================================== -->
-  
+  <material name="brazo_color">
+    <color rgba="0.9 0.55 0.0 1"/> <!-- Naranja industrial -->
+  </material>
+
+  <material name="imu_color">
+    <color rgba="0.1 0.4 0.8 1"/> <!-- Azul electrónica -->
+  </material>
+
+  <!-- ==================================================================== -->
+  <!-- 2. CHASIS BASE                                                       -->
+  <!-- Dimensiones reales de referencia: 40cm largo (x: -0.20 a +0.20),     -->
+  <!-- 30cm ancho (y: -0.15 a +0.15), 20cm alto (z: 0.00 a +0.20)           -->
+  <!-- ==================================================================== -->
   <link name="base_footprint"/>
 
   <joint name="base_joint" type="fixed">
     <parent link="base_footprint"/>
     <child link="base_link"/>
-    <!-- Elevamos el chasis para que el eje de las ruedas quede alineado -->
-    <origin xyz="0 0 0.1016" rpy="0 0 0"/> 
+    <!-- Elevamos el chasis para alinear el eje de las ruedas (r = 0.1016m) -->
+    <origin xyz="0 0 0.1016" rpy="0 0 0"/>
   </joint>
 
   <link name="base_link">
     <visual>
-      <!-- Centro del chasis un poco más arriba del eje -->
       <origin xyz="0 0 0.1" rpy="0 0 0"/>
       <geometry>
         <box size="0.4 0.3 0.2"/>
@@ -47,25 +54,19 @@
     </collision>
     <inertial>
       <mass value="25.0"/>
-      <!-- Inercia aproximada de una caja de masa 25kg -->
       <inertia ixx="0.2708" ixy="0.0" ixz="0.0" iyy="0.4166" iyz="0.0" izz="0.5208"/>
     </inertial>
   </link>
 
-  <!-- ============================================== -->
-  <!-- 3. RUEDAS                                      -->
-  <!-- Ruedas de 10.16 cm de radio (20.32 cm diámetro)-->
-  <!-- Asumimos que están montadas en las esquinas    -->
-  <!-- ============================================== -->
-  
-  <!-- Macro para crear las 4 ruedas fácilmente -->
+  <!-- ==================================================================== -->
+  <!-- 3. RUEDAS (4 ruedas Skid-Steer / DiffDrive)                          -->
+  <!-- ==================================================================== -->
   <xacro:macro name="rueda" params="prefix x_reflect y_reflect">
     <link name="${prefix}_wheel">
       <visual>
-        <!-- Girar cilindro para que ruede bien -->
         <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
         <geometry>
-          <cylinder radius="0.1016" length="0.05"/> 
+          <cylinder radius="0.1016" length="0.05"/>
         </geometry>
         <material name="rueda_color"/>
       </visual>
@@ -76,7 +77,7 @@
         </geometry>
       </collision>
       <inertial>
-        <mass value="0.8"/> <!-- 3.2kg total / 4 ruedas -->
+        <mass value="0.8"/>
         <inertia ixx="0.0022" ixy="0" ixz="0" iyy="0.0022" iyz="0" izz="0.0041"/>
       </inertial>
     </link>
@@ -84,53 +85,180 @@
     <joint name="${prefix}_wheel_joint" type="continuous">
       <parent link="base_link"/>
       <child link="${prefix}_wheel"/>
-      <!-- x: +- 0.15m (30cm separación entre ejes del/tras), y: +- 0.175m (afuera del chasis 30cm) -->
       <origin xyz="${x_reflect * 0.15} ${y_reflect * 0.175} 0" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
     </joint>
+
+    <gazebo reference="${prefix}_wheel">
+      <mu1>0.9</mu1>
+      <mu2>0.15</mu2>
+    </gazebo>
   </xacro:macro>
 
-  <!-- Instanciar las 4 ruedas -->
   <xacro:rueda prefix="front_left"  x_reflect="1"  y_reflect="1" />
   <xacro:rueda prefix="front_right" x_reflect="1"  y_reflect="-1" />
   <xacro:rueda prefix="rear_left"   x_reflect="-1" y_reflect="1" />
   <xacro:rueda prefix="rear_right"  x_reflect="-1" y_reflect="-1" />
 
-  <!-- ============================================== -->
-  <!-- 4. SENSOR LIDAR (RPLIDAR A1)                   -->
-  <!-- ============================================== -->
-  
+  <!-- ==================================================================== -->
+  <!-- 4. SENSOR RPLIDAR A1 (ESQUINA SUPERIOR IZQUIERDA)                    -->
+  <!-- Especificación real:                                                 -->
+  <!-- - Posición: esquina delantera-izquierda del techo del chasis         -->
+  <!--   (x = +0.15 m adelante, y = +0.12 m a la izquierda, z = +0.23 m).   -->
+  <!-- - Orientación por defecto: el motor del RPLidar A1 (ángulo 0° / +X   -->
+  <!--   del sensor) apunta hacia ATRÁS del robot (-X de base_link).        -->
+  <!--   Por ello aplicamos yaw = pi (3.14159265 rad):                      -->
+  <!--     *   0° del LiDAR -> Atrás del robot (-X_robot)                   -->
+  <!--     * ±180° del LiDAR -> Adelante del robot (+X_robot)               -->
+  <!--     *  -90° del LiDAR -> Izquierda del robot (+Y_robot, árboles)     -->
+  <!-- ==================================================================== -->
   <link name="lidar_link">
     <visual>
       <geometry>
-        <cylinder radius="0.035" length="0.06"/>
+        <cylinder radius="0.035" length="0.05"/>
       </geometry>
       <material name="lidar_color"/>
     </visual>
+    <!-- Pequeño bloque visual representando el motor del RPLidar A1 (+X_lidar hacia atrás) -->
+    <visual name="motor_rplidar">
+      <origin xyz="0.035 0 -0.01" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.03"/>
+      </geometry>
+      <material name="rueda_color"/>
+    </visual>
     <collision>
       <geometry>
-        <cylinder radius="0.035" length="0.06"/>
+        <cylinder radius="0.035" length="0.05"/>
       </geometry>
     </collision>
+    <inertial>
+      <mass value="0.2"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
   </link>
 
-  <!-- Montaje del LiDAR: Arriba del chasis, apuntando hacia un lado (-90 grados en yaw) -->
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/>
     <child link="lidar_link"/>
-    <!-- Elevado 20cm (techo del chasis) + 3cm. -->
-    <origin xyz="0 0 0.23" rpy="0 0 -1.57079632679"/> 
+    <!-- Esquina superior izquierda (x=+0.15m frente, y=+0.12m izq, z=0.23m alto), rotado pi rad -->
+    <origin xyz="0.15 0.12 0.23" rpy="0 0 3.14159265359"/>
   </joint>
 
-  <!-- ============================================== -->
-  <!-- 5. PLUGINS DE GAZEBO                           -->
-  <!-- ============================================== -->
-  
-  <!-- Plugin Skid Steer Drive (Para robot de 4 ruedas) -->
-  <!-- Plugin de Movimiento (Diff Drive / Skid Steer en Gazebo Fortress) -->
+  <!-- ==================================================================== -->
+  <!-- 5. BRAZO TRASERO EXTENSIBLE (STEPPER EN LA PARTE TRASERA)            -->
+  <!-- Especificación real:                                                 -->
+  <!-- - Ubicado en el extremo trasero izquierdo del chasis (x = -0.17 m).  -->
+  <!-- - Al recibir MOVE_Stepper positivo (+X), se despliega hacia la       -->
+  <!--   izquierda (+Y_robot) hacia el tronco del árbol; con -X se retrae.  -->
+  <!-- - Como el LiDAR está en x = +0.15 m y el brazo en x = -0.17 m        -->
+  <!--   (separación longitudinal de 0.32 m), el delay de 1.0 s a 0.20 m/s  -->
+  <!--   alinea exactamente este brazo trasero con el centro del tronco.    -->
+  <!-- ==================================================================== -->
+  <link name="brazo_soporte_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.08 0.05"/>
+      </geometry>
+      <material name="rueda_color"/>
+    </visual>
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.0002" ixy="0" ixz="0" iyy="0.0002" iyz="0" izz="0.0002"/>
+    </inertial>
+  </link>
+
+  <joint name="brazo_soporte_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="brazo_soporte_link"/>
+    <!-- Parte más trasera del robot (x = -0.17 m), costado izquierdo (y = +0.11 m) -->
+    <origin xyz="-0.17 0.11 0.14" rpy="0 0 0"/>
+  </joint>
+
+  <link name="brazo_extensible_link">
+    <visual>
+      <!-- Barra extensible de 25 cm orientada hacia el lado izquierdo (+Y) -->
+      <origin xyz="0 0.02 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.26 0.03"/>
+      </geometry>
+      <material name="brazo_color"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.02 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.26 0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.25"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Articulación prismática que simula el recorrido lineal del stepper (+Y) -->
+  <joint name="brazo_stepper_joint" type="prismatic">
+    <parent link="brazo_soporte_link"/>
+    <child link="brazo_extensible_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="0.25" effort="50.0" velocity="0.25"/>
+    <dynamics damping="5.0" friction="0.5"/>
+  </joint>
+
+  <!-- ==================================================================== -->
+  <!-- 6. SENSOR FRONTAL TF-MINI (DETECCIÓN DE OBSTÁCULOS FRONTALES)        -->
+  <!-- ==================================================================== -->
+  <link name="tfmini_link">
+    <visual>
+      <geometry>
+        <box size="0.02 0.03 0.02"/>
+      </geometry>
+      <material name="lidar_color"/>
+    </visual>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+
+  <joint name="tfmini_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tfmini_link"/>
+    <!-- Frente del chasis (x = +0.21 m para sobresalir de la caja de colisión) -->
+    <origin xyz="0.21 0 0.15" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================================================================== -->
+  <!-- 7. SENSOR IMU (INTEGRADO CON LA STM32 PARA MANTENER RUMBO)           -->
+  <!-- ==================================================================== -->
+  <link name="imu_link">
+    <visual>
+      <geometry>
+        <box size="0.03 0.03 0.01"/>
+      </geometry>
+      <material name="imu_color"/>
+    </visual>
+    <inertial>
+      <mass value="0.02"/>
+      <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0.205" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================================================================== -->
+  <!-- 8. PLUGINS DE SIMULACIÓN EN GAZEBO FORTRESS                          -->
+  <!-- ==================================================================== -->
+
+  <!-- 8.1 Tracción diferencial de 4 ruedas -->
   <gazebo>
     <plugin filename="ignition-gazebo-diff-drive-system" name="ignition::gazebo::systems::DiffDrive">
-      <!-- Ruedas izquierdas y derechas -->
       <left_joint>front_left_wheel_joint</left_joint>
       <left_joint>rear_left_wheel_joint</left_joint>
       <right_joint>front_right_wheel_joint</right_joint>
@@ -147,18 +275,61 @@
     </plugin>
   </gazebo>
 
-  <!-- Plugin del RPLiDAR en Gazebo Fortress -->
+  <!-- 8.2 Controlador de posición del brazo trasero (stepper) -->
+  <gazebo>
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>brazo_stepper_joint</joint_name>
+      <topic>/brazo/cmd_pos</topic>
+      <p_gain>40.0</p_gain>
+      <i_gain>0.5</i_gain>
+      <d_gain>4.0</d_gain>
+      <i_max>10.0</i_max>
+      <i_min>-10.0</i_min>
+      <cmd_max>50.0</cmd_max>
+      <cmd_min>-50.0</cmd_min>
+    </plugin>
+  </gazebo>
+
+  <!-- 8.3 Publicador de estado de articulaciones (para visualizar ruedas y brazo) -->
+  <gazebo>
+    <plugin filename="ignition-gazebo-joint-state-publisher-system"
+            name="ignition::gazebo::systems::JointStatePublisher">
+      <topic>/joint_states</topic>
+    </plugin>
+  </gazebo>
+
+  <!-- 8.4 Sistema y sensor IMU en Gazebo Fortress -->
+  <gazebo>
+    <plugin filename="libignition-gazebo-imu-system.so"
+            name="ignition::gazebo::systems::Imu"/>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>1</always_on>
+      <update_rate>50</update_rate>
+      <visualize>true</visualize>
+      <topic>/imu/data</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
+      <ignition_frame_id>imu_link</ignition_frame_id>
+    </sensor>
+  </gazebo>
+
+  <!-- 8.5 RPLidar A1 de 360° en la esquina superior izquierda -->
   <gazebo reference="lidar_link">
     <sensor type="gpu_lidar" name="rplidar_sensor">
       <topic>/scan</topic>
       <update_rate>10</update_rate>
+      <gz_frame_id>lidar_link</gz_frame_id>
+      <ignition_frame_id>lidar_link</ignition_frame_id>
       <lidar>
         <scan>
           <horizontal>
             <samples>360</samples>
             <resolution>1</resolution>
-            <min_angle>-0.5235987</min_angle>
-            <max_angle>0.5235987</max_angle>
+            <min_angle>-3.14159265</min_angle>
+            <max_angle>3.14159265</max_angle>
           </horizontal>
         </scan>
         <range>
@@ -172,33 +343,16 @@
     </sensor>
   </gazebo>
 
-  <!-- ============================================== -->
-  <!-- 6. TF-MINI (SENSOR DE DISTANCIA FRONTAL)       -->
-  <!-- ============================================== -->
-  <link name="tfmini_link">
-    <visual>
-      <geometry><box size="0.02 0.02 0.02"/></geometry>
-      <material name="lidar_color"/>
-    </visual>
-  </link>
-
-  <joint name="tfmini_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="tfmini_link"/>
-    <!-- CAMBIO: x = 0.21 para que sobresalga de la caja de colisión del chasis (que mide 0.4 total, es decir +-0.2) -->
-    <origin xyz="0.21 0 0.15" rpy="0 0 0"/> 
-  </joint>
-
+  <!-- 8.6 Sensor frontal TF-Mini -->
   <gazebo reference="tfmini_link">
-    <!-- En Ignition Fortress usamos gpu_lidar para garantizar que el rayo choque bien con mallas -->
     <sensor type="gpu_lidar" name="tfmini_sensor">
-      <!-- Asegurarnos de que el tópico base sea limpio -->
       <topic>/tf_mini/scan</topic>
       <update_rate>20</update_rate>
+      <gz_frame_id>tfmini_link</gz_frame_id>
+      <ignition_frame_id>tfmini_link</ignition_frame_id>
       <lidar>
         <scan>
           <horizontal>
-            <!-- 3 rayos muy juntos simulando un haz concentrado para evitar que pase por agujeros en la malla -->
             <samples>3</samples>
             <resolution>1</resolution>
             <min_angle>-0.01</min_angle>
@@ -206,7 +360,7 @@
           </horizontal>
         </scan>
         <range>
-          <min>0.02</min> <!-- Reducimos el mínimo para evitar -inf si algo toca el chasis -->
+          <min>0.02</min>
           <max>12.0</max>
           <resolution>0.01</resolution>
         </range>

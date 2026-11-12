@@ -2,7 +2,9 @@
 <sdf version="1.6">
   <world name="cultivo_arboles_world">
 
-    <!-- 1. FÍSICA Y PLUGINS BÁSICOS DE GAZEBO FORTRESS -->
+    <!-- ================================================================== -->
+    <!-- 1. FÍSICA Y PLUGINS DE GAZEBO FORTRESS                             -->
+    <!-- ================================================================== -->
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
@@ -14,22 +16,26 @@
       <render_engine>ogre2</render_engine>
     </plugin>
 
-    <!-- 2. LUZ SOLAR -->
+    <!-- ================================================================== -->
+    <!-- 2. ILUMINACIÓN SOLAR AGRÍCOLA                                      -->
+    <!-- ================================================================== -->
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
-      <pose>0 0 10 0 0 0</pose>
-      <diffuse>0.8 0.8 0.8 1</diffuse>
-      <specular>0.2 0.2 0.2 1</specular>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.90 0.88 0.82 1</diffuse>
+      <specular>0.25 0.25 0.20 1</specular>
       <attenuation>
         <range>1000</range>
         <constant>0.9</constant>
         <linear>0.01</linear>
         <quadratic>0.001</quadratic>
       </attenuation>
-      <direction>-0.5 0.1 -0.9</direction>
+      <direction>-0.45 0.20 -0.87</direction>
     </light>
 
-    <!-- 3. PLANO DE SUELO (GROUND PLANE) -->
+    <!-- ================================================================== -->
+    <!-- 3. SUELO BASE DE TIERRA AGRÍCOLA + FRANJA DE VEGETACIÓN            -->
+    <!-- ================================================================== -->
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
@@ -40,8 +46,16 @@
               <size>100 100</size>
             </plane>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.85</mu>
+                <mu2>0.85</mu2>
+              </ode>
+            </friction>
+          </surface>
         </collision>
-        <visual name="visual">
+        <visual name="suelo_tierra_visual">
           <geometry>
             <plane>
               <normal>0 0 1</normal>
@@ -49,128 +63,747 @@
             </plane>
           </geometry>
           <material>
-            <ambient>0.8 0.8 0.8 1</ambient>
-            <diffuse>0.8 0.8 0.8 1</diffuse>
-            <specular>0.8 0.8 0.8 1</specular>
+            <ambient>0.46 0.36 0.24 1</ambient>
+            <diffuse>0.54 0.42 0.28 1</diffuse>
+            <specular>0.08 0.08 0.06 1</specular>
+          </material>
+        </visual>
+        <!-- Franja visual de pasto/maleza a lo largo de la hilera de árboles -->
+        <visual name="franja_hilera_pasto">
+          <pose>-1.0 -1.0 0.002 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>14.0 0.85 0.004</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.25 0.38 0.16 1</ambient>
+            <diffuse>0.30 0.45 0.19 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- 4. HILERA DE ÁRBOLES (Separación de 2m, Radio de 10cm / 0.1m) -->
-    <!-- Árbol 1 (x = -4.0m) -->
+    <!-- ================================================================== -->
+    <!-- 4. TERRENO IRREGULAR EN EL PASILLO DE NAVEGACIÓN                   -->
+    <!-- Lomadas suaves, camellones diagonales y desniveles asimétricos     -->
+    <!-- (alturas de 1.4 cm a 2.5 cm) bajo las huellas izquierda y derecha  -->
+    <!-- del robot (y ~ -2.15 m a -1.50 m).                                 -->
+    <!-- Perturban el yaw, roll y pitch del robot sin bloquear las ruedas   -->
+    <!-- ni interferir con el plano horizontal del LiDAR (z ~ 0.33 m).      -->
+    <!-- ================================================================== -->
+    <model name="terreno_irregular">
+      <static>true</static>
+      <link name="link">
+
+        <!-- Lomada 1 (x = -5.1 m, huella izquierda): desvía el robot hacia la derecha al arrancar -->
+        <collision name="loma_1_col">
+          <pose>-5.10 -1.66 -0.020 0.03 -0.02 0.32</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.38</radius>
+              <length>0.072</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="loma_1_vis">
+          <pose>-5.10 -1.66 -0.020 0.03 -0.02 0.32</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.38</radius>
+              <length>0.072</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.40 0.30 0.19 1</ambient>
+            <diffuse>0.48 0.36 0.22 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Camellón diagonal 2 (x = -4.45 m, cruza en ángulo): induce alabeo y guiñada a la izquierda -->
+        <collision name="camellon_2_col">
+          <pose>-4.45 -1.92 -0.012 -0.025 0.02 -0.38</pose>
+          <geometry>
+            <box>
+              <size>0.55 0.42 0.056</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="camellon_2_vis">
+          <pose>-4.45 -1.92 -0.012 -0.025 0.02 -0.38</pose>
+          <geometry>
+            <box>
+              <size>0.55 0.42 0.056</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.36 0.27 0.17 1</ambient>
+            <diffuse>0.44 0.33 0.20 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Montículo 3 (x = -3.30 m, claro entre árbol 1 y 2, huella derecha): empuja hacia los árboles -->
+        <collision name="loma_3_col">
+          <pose>-3.30 -1.98 -0.018 -0.03 0.015 -0.25</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.42</radius>
+              <length>0.076</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="loma_3_vis">
+          <pose>-3.30 -1.98 -0.018 -0.03 0.015 -0.25</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.42</radius>
+              <length>0.076</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.42 0.32 0.20 1</ambient>
+            <diffuse>0.50 0.38 0.24 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Surco/bache elevado 4 (x = -2.55 m, huella izquierda): desvía a la derecha antes del árbol 2 -->
+        <collision name="loma_4_col">
+          <pose>-2.55 -1.65 -0.019 0.028 0.02 0.28</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.36</radius>
+              <length>0.074</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="loma_4_vis">
+          <pose>-2.55 -1.65 -0.019 0.028 0.02 0.28</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.36</radius>
+              <length>0.074</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.38 0.29 0.18 1</ambient>
+            <diffuse>0.46 0.35 0.21 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Camellón diagonal 5 (x = -1.05 m, entre árbol 2 y 3): desnivel cruzado -->
+        <collision name="camellon_5_col">
+          <pose>-1.05 -1.80 -0.013 0.02 -0.025 0.42</pose>
+          <geometry>
+            <box>
+              <size>0.60 0.48 0.058</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="camellon_5_vis">
+          <pose>-1.05 -1.80 -0.013 0.02 -0.025 0.42</pose>
+          <geometry>
+            <box>
+              <size>0.60 0.48 0.058</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.26 0.16 1</ambient>
+            <diffuse>0.43 0.32 0.19 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Lomada 6 (x = +0.75 m, claro entre árbol 3 y 4, huella derecha): desvía hacia la izquierda -->
+        <collision name="loma_6_col">
+          <pose>0.75 -1.96 -0.018 -0.028 0.018 -0.30</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.44</radius>
+              <length>0.076</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="loma_6_vis">
+          <pose>0.75 -1.96 -0.018 -0.028 0.018 -0.30</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.44</radius>
+              <length>0.076</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.41 0.31 0.19 1</ambient>
+            <diffuse>0.49 0.37 0.23 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Lomada 7 (x = +1.55 m, huella izquierda antes del árbol 4): empuja hacia la derecha -->
+        <collision name="loma_7_col">
+          <pose>1.55 -1.66 -0.019 0.025 -0.02 0.35</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.38</radius>
+              <length>0.074</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="loma_7_vis">
+          <pose>1.55 -1.66 -0.019 0.025 -0.02 0.35</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.38</radius>
+              <length>0.074</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.37 0.28 0.17 1</ambient>
+            <diffuse>0.45 0.34 0.21 1</diffuse>
+          </material>
+        </visual>
+
+      </link>
+    </model>
+
+    <!-- ================================================================== -->
+    <!-- 5. HILERA DE ÁRBOLES REALISTAS CON SEPARACIONES, RADIOS Y          -->
+    <!--    GEOMETRÍA CILÍNDRICA IRREGULAR (LÓBULOS DE CORTEZA + NUDOS)     -->
+    <!--                                                                    -->
+    <!-- Resumen de la hilera:                                              -->
+    <!-- - arbol_1: x = -4.15 m, y = -1.05 m | Radio ~ 0.085 m (delgado)    -->
+    <!-- - arbol_2: x = -1.80 m, y = -0.94 m | Radio ~ 0.120 m (sep 2.35 m) -->
+    <!-- - arbol_3: x = -0.05 m, y = -1.04 m | Radio ~ 0.076 m (sep 1.75 m) -->
+    <!-- - arbol_4: x = +2.35 m, y = -0.96 m | Radio ~ 0.130 m (sep 2.40 m) -->
+    <!-- ================================================================== -->
+
+    <!-- ================================================================== -->
+    <!-- ÁRBOL 1: Joven, corteza acanalada (x = -4.15 m, y = -1.05 m)       -->
+    <!-- Radio efectivo ~ 0.085 m, levemente inclinado                      -->
+    <!-- ================================================================== -->
     <model name="arbol_1">
       <static>true</static>
-      <pose>-4.0 -1.0 1.0 0 0 0</pose>
+      <pose>-4.15 -1.05 0.0 0 0 0</pose>
       <link name="link">
-        <collision name="collision">
+        <!-- Núcleo del tronco con leve inclinación natural -->
+        <collision name="tronco_central_col">
+          <pose>0 0 0.95 0.022 -0.018 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.080</radius>
+              <length>1.90</length>
             </cylinder>
           </geometry>
         </collision>
-        <visual name="visual">
+        <visual name="tronco_central_vis">
+          <pose>0 0 0.95 0.022 -0.018 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.080</radius>
+              <length>1.90</length>
             </cylinder>
           </geometry>
           <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.5 0.3 0.15 1</diffuse>
+            <ambient>0.38 0.24 0.12 1</ambient>
+            <diffuse>0.46 0.30 0.15 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Lóbulos/nervaduras verticales de corteza (afectan visual y rayos LiDAR) -->
+        <collision name="corteza_sur_col">
+          <pose>0.012 -0.024 0.85 0.02 -0.01 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.064</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_sur_vis">
+          <pose>0.012 -0.024 0.85 0.02 -0.01 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.064</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.30 0.18 0.09 1</ambient>
+            <diffuse>0.38 0.23 0.11 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_este_col">
+          <pose>0.022 0.010 0.80 -0.015 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.062</radius>
+              <length>1.60</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_este_vis">
+          <pose>0.022 0.010 0.80 -0.015 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.062</radius>
+              <length>1.60</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.44 0.29 0.15 1</ambient>
+            <diffuse>0.52 0.35 0.18 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_oeste_col">
+          <pose>-0.020 -0.014 0.90 0.01 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.065</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_oeste_vis">
+          <pose>-0.020 -0.014 0.90 0.01 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.065</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.33 0.20 0.10 1</ambient>
+            <diffuse>0.41 0.25 0.12 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Raíces en la base y copa de follaje -->
+        <visual name="raices_base_vis">
+          <pose>0 0 0.07 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.115</radius>
+              <length>0.14</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.30 0.18 0.09 1</ambient>
+            <diffuse>0.36 0.22 0.11 1</diffuse>
+          </material>
+        </visual>
+        <visual name="copa_follaje_vis">
+          <pose>0.03 -0.02 2.05 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.52</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.16 0.38 0.12 1</ambient>
+            <diffuse>0.22 0.48 0.16 1</diffuse>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- Árbol 2 (x = -2.0m, Separado 2m) -->
+    <!-- ================================================================== -->
+    <!-- ÁRBOL 2: Maduro y grueso (x = -1.80 m, y = -0.94 m, sep = 2.35 m)  -->
+    <!-- Radio efectivo ~ 0.120 m, más alejado del pasillo                  -->
+    <!-- ================================================================== -->
     <model name="arbol_2">
       <static>true</static>
-      <pose>-2.0 -1.0 1.0 0 0 0</pose>
+      <pose>-1.80 -0.94 0.0 0 0 0</pose>
       <link name="link">
-        <collision name="collision">
+        <collision name="tronco_central_col">
+          <pose>0 0 1.00 -0.028 0.020 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.112</radius>
+              <length>2.00</length>
             </cylinder>
           </geometry>
         </collision>
-        <visual name="visual">
+        <visual name="tronco_central_vis">
+          <pose>0 0 1.00 -0.028 0.020 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.112</radius>
+              <length>2.00</length>
             </cylinder>
           </geometry>
           <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.5 0.3 0.15 1</diffuse>
+            <ambient>0.34 0.21 0.11 1</ambient>
+            <diffuse>0.42 0.26 0.13 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Lóbulos asimétricos de corteza gruesa -->
+        <collision name="corteza_sur_col">
+          <pose>-0.018 -0.032 0.90 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.090</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_sur_vis">
+          <pose>-0.018 -0.032 0.90 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.090</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.27 0.16 0.08 1</ambient>
+            <diffuse>0.34 0.21 0.10 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_sureste_col">
+          <pose>0.030 -0.020 0.85 0.015 0.025 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.088</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_sureste_vis">
+          <pose>0.030 -0.020 0.85 0.015 0.025 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.088</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.41 0.26 0.13 1</ambient>
+            <diffuse>0.49 0.31 0.16 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_noroeste_col">
+          <pose>-0.028 0.022 0.95 -0.01 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.092</radius>
+              <length>1.90</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_noroeste_vis">
+          <pose>-0.028 0.022 0.95 -0.01 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.092</radius>
+              <length>1.90</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.31 0.19 0.09 1</ambient>
+            <diffuse>0.39 0.24 0.12 1</diffuse>
+          </material>
+        </visual>
+
+        <visual name="nudo_tronco_vis">
+          <pose>0.06 -0.08 0.65 0.3 0.2 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.055</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.25 0.15 0.07 1</ambient>
+            <diffuse>0.32 0.19 0.09 1</diffuse>
+          </material>
+        </visual>
+        <visual name="raices_base_vis">
+          <pose>0 0 0.08 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.155</radius>
+              <length>0.16</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.28 0.17 0.08 1</ambient>
+            <diffuse>0.35 0.21 0.10 1</diffuse>
+          </material>
+        </visual>
+        <visual name="copa_follaje_vis">
+          <pose>-0.04 0.03 2.15 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.64</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.14 0.34 0.10 1</ambient>
+            <diffuse>0.19 0.44 0.14 1</diffuse>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- Árbol 3 (x = 0.0m, Separado 2m) -->
+    <!-- ================================================================== -->
+    <!-- ÁRBOL 3: Esbelto y nudoso (x = -0.05 m, y = -1.04 m, sep = 1.75 m) -->
+    <!-- Radio efectivo ~ 0.076 m, más cercano al pasillo                   -->
+    <!-- ================================================================== -->
     <model name="arbol_3">
       <static>true</static>
-      <pose>0.0 -1.0 1.0 0 0 0</pose>
+      <pose>-0.05 -1.04 0.0 0 0 0</pose>
       <link name="link">
-        <collision name="collision">
+        <collision name="tronco_central_col">
+          <pose>0 0 0.95 0.018 0.026 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.070</radius>
+              <length>1.90</length>
             </cylinder>
           </geometry>
         </collision>
-        <visual name="visual">
+        <visual name="tronco_central_vis">
+          <pose>0 0 0.95 0.018 0.026 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.070</radius>
+              <length>1.90</length>
             </cylinder>
           </geometry>
           <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.5 0.3 0.15 1</diffuse>
+            <ambient>0.42 0.27 0.14 1</ambient>
+            <diffuse>0.50 0.33 0.17 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Costillas de corteza irregulares -->
+        <collision name="corteza_sur_col">
+          <pose>0.014 -0.020 0.85 0.015 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.058</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_sur_vis">
+          <pose>0.014 -0.020 0.85 0.015 0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.058</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.33 0.21 0.10 1</ambient>
+            <diffuse>0.41 0.26 0.13 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_suroeste_col">
+          <pose>-0.018 -0.016 0.80 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.056</radius>
+              <length>1.60</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_suroeste_vis">
+          <pose>-0.018 -0.016 0.80 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.056</radius>
+              <length>1.60</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.36 0.23 0.12 1</ambient>
+            <diffuse>0.44 0.29 0.15 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_norte_col">
+          <pose>0.008 0.022 0.90 0.01 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.057</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_norte_vis">
+          <pose>0.008 0.022 0.90 0.01 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.057</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.45 0.30 0.16 1</ambient>
+            <diffuse>0.53 0.36 0.19 1</diffuse>
+          </material>
+        </visual>
+
+        <visual name="raices_base_vis">
+          <pose>0 0 0.06 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.105</radius>
+              <length>0.12</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.31 0.19 0.09 1</ambient>
+            <diffuse>0.38 0.24 0.12 1</diffuse>
+          </material>
+        </visual>
+        <visual name="copa_follaje_vis">
+          <pose>0.02 0.04 2.00 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.48</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.18 0.40 0.13 1</ambient>
+            <diffuse>0.24 0.50 0.18 1</diffuse>
           </material>
         </visual>
       </link>
     </model>
 
-    <!-- Árbol 4 (x = 2.0m, Separado 2m) -->
+    <!-- ================================================================== -->
+    <!-- ÁRBOL 4: Robusto e irregular (x = +2.35 m, y = -0.96 m, sep = 2.40m)-->
+    <!-- Radio efectivo ~ 0.130 m                                           -->
+    <!-- ================================================================== -->
     <model name="arbol_4">
       <static>true</static>
-      <pose>2.0 -1.0 1.0 0 0 0</pose>
+      <pose>2.35 -0.96 0.0 0 0 0</pose>
       <link name="link">
-        <collision name="collision">
+        <collision name="tronco_central_col">
+          <pose>0 0 1.00 -0.020 -0.024 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.120</radius>
+              <length>2.00</length>
             </cylinder>
           </geometry>
         </collision>
-        <visual name="visual">
+        <visual name="tronco_central_vis">
+          <pose>0 0 1.00 -0.020 -0.024 0</pose>
           <geometry>
             <cylinder>
-              <radius>0.1</radius>
-              <length>2.0</length>
+              <radius>0.120</radius>
+              <length>2.00</length>
             </cylinder>
           </geometry>
           <material>
-            <ambient>0.4 0.25 0.1 1</ambient>
-            <diffuse>0.5 0.3 0.15 1</diffuse>
+            <ambient>0.32 0.19 0.09 1</ambient>
+            <diffuse>0.40 0.24 0.12 1</diffuse>
+          </material>
+        </visual>
+
+        <!-- Lóbulos de corteza pronunciados -->
+        <collision name="corteza_sur_col">
+          <pose>0.020 -0.036 0.90 -0.015 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.096</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_sur_vis">
+          <pose>0.020 -0.036 0.90 -0.015 -0.02 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.096</radius>
+              <length>1.80</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.26 0.15 0.07 1</ambient>
+            <diffuse>0.33 0.19 0.09 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_suroeste_col">
+          <pose>-0.034 -0.022 0.85 0.02 -0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.094</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_suroeste_vis">
+          <pose>-0.034 -0.022 0.85 0.02 -0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.094</radius>
+              <length>1.70</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.38 0.23 0.11 1</ambient>
+            <diffuse>0.46 0.28 0.14 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="corteza_este_col">
+          <pose>0.035 0.018 0.95 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.095</radius>
+              <length>1.90</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="corteza_este_vis">
+          <pose>0.035 0.018 0.95 -0.02 0.015 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.095</radius>
+              <length>1.90</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.29 0.17 0.08 1</ambient>
+            <diffuse>0.37 0.22 0.10 1</diffuse>
+          </material>
+        </visual>
+
+        <visual name="raices_base_vis">
+          <pose>0 0 0.09 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.168</radius>
+              <length>0.18</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.26 0.15 0.07 1</ambient>
+            <diffuse>0.33 0.19 0.09 1</diffuse>
+          </material>
+        </visual>
+        <visual name="copa_follaje_vis">
+          <pose>-0.03 -0.03 2.20 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.68</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.15 0.36 0.11 1</ambient>
+            <diffuse>0.20 0.46 0.15 1</diffuse>
           </material>
         </visual>
       </link>
     </model>
-
-
 
   </world>
 </sdf>
