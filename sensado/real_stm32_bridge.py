@@ -6,7 +6,7 @@ from collections import deque
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, Int32
 import serial
 
 # =============================================================================
@@ -26,12 +26,16 @@ STOP_ALL = 9        # Detiene todo: ruedas, stepper y bomba
 START_MOV = 10      # Inicia movimiento (m/s), fija rumbo actual como 0° y enciende IMU
 STOP_MOV = 11       # Detiene solo las ruedas, mantiene rumbo actual y apaga IMU
 
-ERRORES_STM32 = {
+# Códigos recibidos desde la STM32 (2 bytes: [codigo, codigo ^ 0xA5])
+BRAZO_RETRAIDO = 3   # Brazo totalmente retraído (Brazo home)
+BRAZO_EXTENDIDO = 4  # Brazo totalmente extendido (Brazo end)
+
+MENSAJES_STM32 = {
     0: "Error de comunicación",
     1: "Caída de voltaje",
     2: "Fallo bomba",
-    3: "Brazo home",
-    4: "Brazo end"
+    BRAZO_RETRAIDO: "Brazo totalmente retraído (Brazo home)",
+    BRAZO_EXTENDIDO: "Brazo totalmente extendido (Brazo end)",
 }
 
 
@@ -81,6 +85,9 @@ class RealSTM32Bridge(Node):
         self.create_subscription(Float32, '/navegacion/corregir_grados', self.recibir_correccion, 10)
         self.create_subscription(Bool, '/bomba', self.recibir_bomba, 10)
         self.create_subscription(Float32, '/brazo_mm', self.recibir_brazo, 10)
+
+        # Publicador de confirmaciones del brazo desde la STM32 (3 = retraído, 4 = extendido)
+        self.pub_estado_brazo = self.create_publisher(Int32, '/stm32/estado_brazo', 10)
 
         self.create_timer(0.05, self.enviar_pendiente) 
 
@@ -149,10 +156,15 @@ class RealSTM32Bridge(Node):
             )
 
     # =========================================================================
-    # Lectura de diagnósticos enviados por la STM32
+    # Lectura de mensajes y diagnósticos enviados por la STM32
     # =========================================================================
-    def _leer_errores_stm32(self):
-        """Lee paquetes de error desde la STM32."""
+    def _leer_mensajes_stm32(self):
+        """
+        Lee paquetes de 2 bytes enviados desde la STM32 ([codigo, codigo ^ 0xA5]):
+        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All internamente).
+        - 3: Brazo totalmente retraído (Brazo home).
+        - 4: Brazo totalmente extendido (Brazo end).
+        """
         try:
             waiting = self.uart.in_waiting
             if waiting > 0:
@@ -162,20 +174,27 @@ class RealSTM32Bridge(Node):
 
         while len(self.rx_buf) >= 2:
             b0, b1 = self.rx_buf[0], self.rx_buf[1]
-            if (b0 ^ 0xA5) == b1 and b0 in ERRORES_STM32:
-                self.get_logger().error(
-                    f"STM32 reportó STOP_All por error ({b0}): {ERRORES_STM32[b0]}"
-                )
+            if (b0 ^ 0xA5) == b1 and b0 in MENSAJES_STM32:
+                if b0 in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
+                    self.get_logger().info(
+                        f"[STM32 -> RPi] Mensaje ({b0}): {MENSAJES_STM32[b0]}"
+                    )
+                    msg_brazo = Int32()
+                    msg_brazo.data = int(b0)
+                    self.pub_estado_brazo.publish(msg_brazo)
+                else:
+                    self.get_logger().error(
+                        f"[STM32 -> RPi] Error ({b0}): {MENSAJES_STM32[b0]} (STOP_All)"
+                    )
                 del self.rx_buf[:2]
             else:
-                #del self.rx_buf[:1]
-                print(ERRORES_STM32[b0])
+                del self.rx_buf[:1]
 
     # =========================================================================
     # Loop principal
     # =========================================================================
     def enviar_pendiente(self):
-        self._leer_errores_stm32()
+        self._leer_mensajes_stm32()
 
         # Watchdog: Si dejan de llegar comandos de ROS (> 0.5 s), detener todo
         sin_comandos = (self.ultimo_cmd > 0.0 and (time.monotonic() - self.ultimo_cmd) > 0.6)

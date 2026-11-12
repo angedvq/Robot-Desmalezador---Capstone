@@ -17,7 +17,6 @@ def generate_launch_description():
     timeout_sin_arbol = LaunchConfiguration('timeout_sin_arbol')
     tiempo_delay_brazo = LaunchConfiguration('tiempo_delay_brazo')
     tiempo_brazo_extendido = LaunchConfiguration('tiempo_brazo_extendido')
-    tiempo_brazo_retraido = LaunchConfiguration('tiempo_brazo_retraido')
     desplazamiento_brazo_mm = LaunchConfiguration('desplazamiento_brazo_mm')
     usar_tfmini = LaunchConfiguration('usar_tfmini')
 
@@ -72,18 +71,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'tiempo_brazo_extendido',
-            default_value='8.0',
-            description='Tiempo que el brazo permanece extendido frente al tronco (s)',
-        ),
-        DeclareLaunchArgument(
-            'tiempo_brazo_retraido',
-            default_value='8.0',
-            description='Tiempo de espera para retracción del brazo antes de avanzar (s)',
+            default_value='4.0',
+            description='Tiempo que el robot se mantiene detenido con el brazo ya extendido (s)',
         ),
         DeclareLaunchArgument(
             'desplazamiento_brazo_mm',
-            default_value='410.0',
-            description='Magnitud enviada a /brazo_mm (+X extiende, -X retrae)',
+            default_value='600.0',
+            description='Magnitud enviada a /brazo_mm (+600 mm extiende, -600 mm retrae)',
         ),
         DeclareLaunchArgument(
             'usar_tfmini',
@@ -166,7 +160,6 @@ def generate_launch_description():
                 'timeout_sin_arbol': timeout_sin_arbol,
                 'tiempo_delay_brazo': tiempo_delay_brazo,
                 'tiempo_brazo_extendido': tiempo_brazo_extendido,
-                'tiempo_brazo_retraido': tiempo_brazo_retraido,
                 'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
                 'usar_tfmini': usar_tfmini,
             }],
