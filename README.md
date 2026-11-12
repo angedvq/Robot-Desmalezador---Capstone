@@ -53,4 +53,19 @@ colcon build --packages-select sensado
 source install/setup.bash
 
 ros2 launch sensado sim.launch.py
+
+```
+
+**=== Ejecutar Rutina de Navegación ===**
+```
+ssh g4@192.168.1.246
+pass: 12345678
+
+cd ros2_ws/Robot-Desmalezador---Capstone
+
+colcon build --symlink-install
+source install/setup.bash
+
+ros2 launch sensado {NOMBRE_LAUNCH_RUTINA}.launch.py
+
 ```
