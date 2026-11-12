@@ -187,8 +187,10 @@ class RealSTM32Bridge(Node):
                         f"[STM32 -> RPi] Error ({b0}): {MENSAJES_STM32[b0]} (STOP_All)"
                     )
                 del self.rx_buf[:2]
+                print(b0)
             else:
                 del self.rx_buf[:1]
+                print("error catastrofico")
 
     # =========================================================================
     # Loop principal
