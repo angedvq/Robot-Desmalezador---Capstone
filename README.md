@@ -66,6 +66,6 @@ cd ros2_ws/Robot-Desmalezador---Capstone
 colcon build --symlink-install
 source install/setup.bash
 
-ros2 launch sensado {NOMBRE_LAUNCH_RUTINA}.launch.py
+ros2 launch sensado real_rutina.launch.py distancia_meta:=0.70 meta_arboles:=4 tiempo_delay_brazo:=1.0 tiempo_brazo_extendido:=4.0 
 
 ```
