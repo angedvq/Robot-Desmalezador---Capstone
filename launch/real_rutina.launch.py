@@ -61,7 +61,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'timeout_sin_arbol',
-            default_value='20.0',
+            default_value='50.0',
             description='Tiempo máximo sin detectar un árbol antes de detenerse (s)',
         ),
         DeclareLaunchArgument(

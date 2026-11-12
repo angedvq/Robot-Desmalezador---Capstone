@@ -31,7 +31,7 @@ class RealRutinaNavegacion(Node):
 
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
-        self.declare_parameter('timeout_sin_arbol', 20.0)    
+        self.declare_parameter('timeout_sin_arbol', 50.0)    
         self.declare_parameter('tiempo_delay_brazo', 1.5)         # Delay tras detección LiDAR para alinear brazo (s)
         self.declare_parameter('tiempo_brazo_extendido', 4.0)     # Tiempo detenido con el brazo ya extendido (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)        # Ceguera temporal para avanzar a sgte tronco (s)
