@@ -228,11 +228,7 @@ class RealSTM32Bridge(Node):
                 ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
 
-                # Según Src/logica.c en stm_capstone:
-                # STOP_Mov() ejecuta BLOCK_Heading() (heading_block=1) y SET_VelRef(0),
-                # pero NO apaga tracking en mpu6500.c. Enviamos STOP_MOV y STOP_TRACKING
-                # para congelar el integrador del giroscopio mientras está detenido.
-                self.pendientes.appendleft((STOP_TRACKING, 0.0))
+                # Detener las ruedas y pausar IMU con STOP_Mov
                 self.pendientes.appendleft((STOP_MOV, 0.0))
 
             # Si hay órdenes en cola las enviamos; si la cola está vacía, mantenemos STOP_Mov
@@ -244,14 +240,17 @@ class RealSTM32Bridge(Node):
         else:
             if not self.en_movimiento:
                 self.en_movimiento = True
-                self.primer_arranque = False
-                # Según Src/logica.c y Src/ruedas.c en stm_capstone:
-                # START_Mov (Orden 10) ejecuta START_Tracking(), UNBLOCK_Heading() (heading_block=0)
-                # y SET_VelRef(vel), SIN reiniciar int_heading (solo Orden 2 RESET_Tracking lo reinicia).
-                # Es indispensable enviar START_MOV al reanudar tras cada árbol porque es la única
-                # orden del firmware STM32 que llama a UNBLOCK_Heading().
-                self.pendientes.append((START_MOV, self.velocidad))
-                self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
+                if self.primer_arranque:
+                    # Primer arranque del recorrido: fija 0° paralelo a la hilera y enciende IMU
+                    self.primer_arranque = False
+                    self.pendientes.append((START_MOV, self.velocidad))
+                    if abs(self.ultimo_rumbo) >= 0.01:
+                        self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
+                else:
+                    # Reanudación tras árbol u obstáculo: conserva la referencia 0° original
+                    self.pendientes.append((START_TRACKING, 0.0))
+                    self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
+                    self.pendientes.append((SET_VEL, self.velocidad))
 
             orden, valor = (self.pendientes.popleft() if self.pendientes else (SET_VEL, self.velocidad))
 

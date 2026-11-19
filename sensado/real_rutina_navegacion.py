@@ -268,15 +268,12 @@ class RealRutinaNavegacion(Node):
                 rumbo_objetivo = 0.0
             else:
                 rumbo_objetivo = max(-self.max_grados_rumbo, min(self.max_grados_rumbo, error * self.kp_rumbo))
-            tasa_giro = self.slew_rate_deg_s
         else:
-            # En el claro entre árboles o cuando el tronco ya está a < 0.45 m del LiDAR,
-            # la IMU de la STM32 vuelve rápido a 0.0° para pasar recto frente al tronco
+            # En el espacio entre árboles (o durante el delay para el brazo), mantener 0.0° con la IMU
             rumbo_objetivo = 0.0
-            tasa_giro = max(self.slew_rate_deg_s, 25.0)
 
         # Limitador de pendiente (slew-rate) para que todo giro sea suave
-        max_paso = tasa_giro * self.dt
+        max_paso = self.slew_rate_deg_s * self.dt
         delta = rumbo_objetivo - self.rumbo_suavizado
         if abs(delta) <= max_paso:
             self.rumbo_suavizado = rumbo_objetivo
@@ -391,7 +388,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
+            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -418,7 +415,7 @@ class RealRutinaNavegacion(Node):
             # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
             if tiempo_transcurrido < self.tiempo_delay_brazo:
                 msg_vel.linear.x = self.velocidad_avance
-                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+                #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo
                 msg_vel.linear.x = 0.0
@@ -502,11 +499,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            # Tras 1.0 s de enfriamiento (con el árbol anterior ya atrás), permitir que el
-            # lookahead (0.45..2.0 m) comience a alinear con el siguiente árbol desde lejos
-            self._actualizar_y_publicar_rumbo(
-                now, permitir_correccion_lateral=(tiempo_transcurrido >= 1.0)
-            )
+            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'
