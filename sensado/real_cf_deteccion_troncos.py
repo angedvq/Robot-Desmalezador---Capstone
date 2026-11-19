@@ -190,8 +190,8 @@ class RealPercepcionTroncos(Node):
         # Distancias y radios válidos de tronco (m)
         self.declare_parameter('roi_min_dist', 0.15)
         self.declare_parameter('roi_max_dist', 2.50)
-        self.declare_parameter('radio_tronco_min', 0.15)
-        self.declare_parameter('radio_tronco_max', 0.22)
+        self.declare_parameter('radio_tronco_min', 0.05)
+        self.declare_parameter('radio_tronco_max', 0.18)
 
         # Confirmación por escaneos consecutivos (evita falsos positivos)
         self.declare_parameter('required_detections', 4)
