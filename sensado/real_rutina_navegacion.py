@@ -24,9 +24,9 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal (m/s)
 
         # Parámetros de corrección suave de rumbo (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 30.0)              # Ganancia proporcional. Fuerza de correcion del rumbo
-        self.declare_parameter('max_grados_rumbo', 10.0)      # Límite de ángulo suave. Tope maximo de giro
-        self.declare_parameter('slew_rate_deg_s', 6.0)        # Rampa máxima de giro. Velocidad de giro
+        self.declare_parameter('kp_rumbo', 40.0)              # Ganancia proporcional. Fuerza de correcion del rumbo
+        self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
+        self.declare_parameter('slew_rate_deg_s', 15.0)        # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
 
         # Parámetros de la rutina de árboles y brazo
