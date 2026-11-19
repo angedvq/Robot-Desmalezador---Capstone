@@ -388,7 +388,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -415,7 +415,7 @@ class RealRutinaNavegacion(Node):
             # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
             if tiempo_transcurrido < self.tiempo_delay_brazo:
                 msg_vel.linear.x = self.velocidad_avance
-                #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo
                 msg_vel.linear.x = 0.0
@@ -499,7 +499,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'
