@@ -199,8 +199,8 @@ class RealPercepcionTroncos(Node):
         # del arco láser mientras el chasis gira corrigiendo trayectoria
         self.declare_parameter('roi_min_dist', 0.15)
         self.declare_parameter('roi_max_dist', 2.50)
-        self.declare_parameter('radio_tronco_min', 0.12)
-        self.declare_parameter('radio_tronco_max', 0.16)
+        self.declare_parameter('radio_tronco_min', 0.15)
+        self.declare_parameter('radio_tronco_max', 0.22)
 
         # Confirmación por escaneos en la ventana lateral (2 escaneos para no perderlo al girar)
         self.declare_parameter('required_detections', 2)
