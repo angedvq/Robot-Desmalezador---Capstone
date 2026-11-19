@@ -24,9 +24,9 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal (m/s)
 
         # Parámetros de corrección suave de rumbo (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 30.0)              # Ganancia proporcional. Fuerza de correcion del rumbo
-        self.declare_parameter('max_grados_rumbo', 10.0)      # Límite de ángulo suave. Tope maximo de giro
-        self.declare_parameter('slew_rate_deg_s', 6.0)        # Rampa máxima de giro. Velocidad de giro
+        self.declare_parameter('kp_rumbo', 40.0)              # Ganancia proporcional. Fuerza de correcion del rumbo
+        self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
+        self.declare_parameter('slew_rate_deg_s', 15.0)        # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
 
         # Parámetros de la rutina de árboles y brazo
@@ -388,7 +388,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -415,7 +415,7 @@ class RealRutinaNavegacion(Node):
             # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
             if tiempo_transcurrido < self.tiempo_delay_brazo:
                 msg_vel.linear.x = self.velocidad_avance
-                #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo
                 msg_vel.linear.x = 0.0
@@ -499,7 +499,7 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            #self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'
