@@ -112,7 +112,7 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
             continue
 
         cluster_points = XY_lidar[labels == label]
-        if not (dbscan_min_samples <= len(cluster_points) < 80): # filtrar numero de muestras 
+        if not (dbscan_min_samples <= len(cluster_points) < 120): # filtrar numero de muestras 
             continue
 
         try:
@@ -144,17 +144,24 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
         if y_robot <= 0.10:
             continue
 
-        # Clasificar tronco hallado si está dentro de la zona de deteccion
-        en_disparo = (fov_disparo_min <= ang_centro <= fov_disparo_max)
+        # Clasificar tronco hallado si está dentro de la zona lateral de detección (disparo):
+        # Se acepta tanto por cono angular [fov_disparo_min, fov_disparo_max] como por
+        # ventana longitudinal frente al LiDAR (|x_robot| <= 0.22 m), para que no falle si
+        # el robot pasa más cerca del tronco o con un ángulo residual de corrección.
+        en_disparo_angular = (fov_disparo_min <= ang_centro <= fov_disparo_max)
+        en_disparo_cartesiano = (-0.22 <= x_robot <= 0.22) and (0.15 <= y_robot <= 1.35)
+        en_disparo = en_disparo_angular or en_disparo_cartesiano
         resultado['todos_los_troncos'].append((cx_l, cy_l, r, en_disparo))
         
         if en_disparo:
             candidatos_disparo.append((dist_to_center, x_robot, y_robot, r, cx_l, cy_l))
 
-        # Para el guiado lateral a 0.70 m consideramos troncos que están por delante
-        # o justo al costado del LiDAR (x_robot >= -0.25 m y hasta 2.0 m adelante)
-        if -0.25 <= x_robot <= 2.0:
-            # Guardar a que distancia lateral se encuentra el atbol
+        # Para el guiado lateral a 0.70 m (lookahead) solo consideramos troncos que están
+        # claramente por delante del LiDAR (0.30 m <= x_robot <= 2.20 m).
+        # Así, cuando el tronco ya está a < 0.30 m de pasar frente al LiDAR, el robot
+        # deja de girar y vuelve a 0° para pasar recto frente al tronco y detectarlo siempre.
+        if 0.30 <= x_robot <= 2.20:
+            # Guardar a que distancia lateral se encuentra el arbol
             candidatos_guia.append((dist_to_center, y_robot))
 
     if candidatos_disparo:
@@ -178,9 +185,9 @@ class RealPercepcionTroncos(Node):
         # ---------------------------------------------------------------------
         # Declaración de parámetros 
         # ---------------------------------------------------------------------
-        # FOV de disparo lateral
-        self.declare_parameter('fov_disparo_min_deg', -100.0)
-        self.declare_parameter('fov_disparo_max_deg', -80.0)
+        # FOV de disparo lateral (ampliado para no perder el tronco al venir corrigiendo rumbo)
+        self.declare_parameter('fov_disparo_min_deg', -112.0)
+        self.declare_parameter('fov_disparo_max_deg', -68.0)
 
         # Ventana amplia de búsqueda y guiado lateral hacia la hilera de árboles
         # cubre desde la diagonal frontal-izquierda hasta el lateral
@@ -188,13 +195,15 @@ class RealPercepcionTroncos(Node):
         self.declare_parameter('fov_busqueda_max_deg', -60.0)
 
         # Distancias y radios válidos de tronco (m)
+        # Margen [0.08, 0.20] alrededor de [0.12, 0.16] para tolerar la distorsión
+        # del arco láser mientras el chasis gira corrigiendo trayectoria
         self.declare_parameter('roi_min_dist', 0.15)
         self.declare_parameter('roi_max_dist', 2.50)
-        self.declare_parameter('radio_tronco_min', 0.05)
-        self.declare_parameter('radio_tronco_max', 0.18)
+        self.declare_parameter('radio_tronco_min', 0.12)
+        self.declare_parameter('radio_tronco_max', 0.16)
 
-        # Confirmación por escaneos consecutivos (evita falsos positivos)
-        self.declare_parameter('required_detections', 4)
+        # Confirmación por escaneos en la ventana lateral (2 escaneos para no perderlo al girar)
+        self.declare_parameter('required_detections', 2)
 
         # Extraer valores de parámetros
         self.fov_disparo_min = np.deg2rad(float(self.get_parameter('fov_disparo_min_deg').value))
@@ -257,12 +266,12 @@ class RealPercepcionTroncos(Node):
             msg_dist.data = float('nan')
         self.dist_lat_pub.publish(msg_dist)
 
-        # Conteo de confirmaciones consecutivas en la ventana lateral
+        # Conteo de confirmaciones en la ventana lateral con tolerancia a 1 escaneo ruidoso
         tronco_disparo = info['tronco_en_disparo']
         if tronco_disparo is not None:
-            self.consecutive_detections += 1
+            self.consecutive_detections = min(self.required_detections + 2, self.consecutive_detections + 1)
         else:
-            self.consecutive_detections = 0
+            self.consecutive_detections = max(0, self.consecutive_detections - 1)
 
         # Publicar /arboles_detectados
         pose_array_msg = PoseArray()

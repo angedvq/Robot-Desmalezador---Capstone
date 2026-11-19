@@ -268,12 +268,15 @@ class RealRutinaNavegacion(Node):
                 rumbo_objetivo = 0.0
             else:
                 rumbo_objetivo = max(-self.max_grados_rumbo, min(self.max_grados_rumbo, error * self.kp_rumbo))
+            tasa_giro = self.slew_rate_deg_s
         else:
-            # En el espacio entre árboles (o durante el delay para el brazo), mantener 0.0° con la IMU
+            # En el espacio entre árboles o cuando el tronco ya está a < 0.30 m de pasar frente al LiDAR,
+            # volver rápido a 0.0° con la IMU para pasar recto frente al tronco
             rumbo_objetivo = 0.0
+            tasa_giro = max(self.slew_rate_deg_s, 25.0)
 
-        # Limitador de pendiente (slew-rate) para que todo giro sea suave
-        max_paso = self.slew_rate_deg_s * self.dt
+        # Limitador de pendiente (slew-rate)
+        max_paso = tasa_giro * self.dt
         delta = rumbo_objetivo - self.rumbo_suavizado
         if abs(delta) <= max_paso:
             self.rumbo_suavizado = rumbo_objetivo
@@ -499,7 +502,11 @@ class RealRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
-            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            # Permitir que el lookahead (0.30 <= x_robot <= 2.20 m) empiece a alinear con el
+            # siguiente árbol temprano tras 1.0 s de enfriamiento
+            self._actualizar_y_publicar_rumbo(
+                now, permitir_correccion_lateral=(tiempo_transcurrido >= 1.0)
+            )
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'
