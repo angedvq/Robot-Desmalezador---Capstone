@@ -152,10 +152,10 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
         if en_disparo:
             candidatos_disparo.append((dist_to_center, x_robot, y_robot, r, cx_l, cy_l))
 
-        # Para el guiado lateral a 0.70 m consideramos troncos que están por delante
-        # o justo al costado del LiDAR (x_robot >= -0.25 m y hasta 2.0 m adelante)
-        if -0.25 <= x_robot <= 2.0:
-            # Guardar a que distancia lateral se encuentra el atbol
+        # Para el guiado lateral a 0.70 m consideramos únicamente troncos por delante
+        # del LiDAR (0.25 m <= x_robot <= 2.0 m), dejando los últimos 25 cm para pasar recto
+        if 0.25 <= x_robot <= 2.0:
+            # Guardar a que distancia lateral se encuentra el arbol
             candidatos_guia.append((dist_to_center, x_robot, y_robot, r, cx_l, cy_l))
 
     if candidatos_disparo:

@@ -24,9 +24,11 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal (m/s)
 
         # Parámetros de corrección suave de rumbo (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 40.0)              # Ganancia proporcional. Fuerza de correcion del rumbo
+        self.declare_parameter('kp_rumbo', 45.0)              # Ganancia proporcional (grados por metro de error)
+        self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
+        self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
         self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
-        self.declare_parameter('slew_rate_deg_s', 15.0)        # Rampa máxima de giro. Velocidad de giro
+        self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
 
         # Parámetros de la rutina de árboles y brazo
@@ -47,6 +49,8 @@ class RealRutinaNavegacion(Node):
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
         self.kp_rumbo = float(self.get_parameter('kp_rumbo').value)
+        self.ki_rumbo = float(self.get_parameter('ki_rumbo').value)
+        self.min_grados_rumbo = float(self.get_parameter('min_grados_rumbo').value)
         self.max_grados_rumbo = float(self.get_parameter('max_grados_rumbo').value)
         self.slew_rate_deg_s = float(self.get_parameter('slew_rate_deg_s').value)
         self.alpha_dist = float(self.get_parameter('alpha_dist').value)
@@ -97,6 +101,7 @@ class RealRutinaNavegacion(Node):
         # Variables de guiado lateral y rumbo IMU
         self.distancia_tronco_actual = None
         self.ultimo_tronco_guia_ts = None
+        self.rumbo_integral = 0.0
         self.rumbo_suavizado = 0.0
         self.ultimo_rumbo_enviado = 0.0
         self.ultimo_envio_grados_ts = 0.0
@@ -235,6 +240,7 @@ class RealRutinaNavegacion(Node):
         self.cmd_pub.publish(msg_vel)
 
         self.rumbo_suavizado = 0.0
+        self.rumbo_integral = 0.0
 
     def _pausar_relojes(self, now: float):
         """Congela los tiempos transcurridos durante una pausa por obstáculo o watchdog"""
@@ -250,9 +256,10 @@ class RealRutinaNavegacion(Node):
         """
         Calcula y publica el rumbo objetivo hacia la STM32 por /navegacion/corregir_grados:
         - Si `permitir_correccion_lateral` es True y hay un tronco guía reciente (< 0.5 s),
-          calcula una corrección suave proporcional a `(distancia_tronco - 0.70 m)`.
-        - Si no hay tronco a la vista (claro entre árboles) o estamos alineando/enfriando,
-          el rumbo objetivo es `0.0°` para que la IMU de la STM32 mantenga al robot recto.
+          aplica control PI + ángulo mínimo efectivo (`min_grados_rumbo`) para vencer tanto
+          la fricción de las 4 ruedas como cualquier offset acumulado en `int_heading`.
+        - Cuando el error entra en la banda muerta (< 3 cm) o no hay tronco guía, mantiene
+          el rumbo base acumulado (`self.rumbo_integral`) en vez de forzar el 0° antiguo.
         """
         tronco_guia_vigente = (
             permitir_correccion_lateral
@@ -261,16 +268,30 @@ class RealRutinaNavegacion(Node):
             and (now - self.ultimo_tronco_guia_ts) <= 0.5
         )
 
-        # Si tenemos un tronco guia vigente, aplica una correccion suave 
+        # Si tenemos un tronco guia vigente, aplica corrección Proporcional + Integral
         if tronco_guia_vigente:
             error = self.distancia_tronco_actual - self.distancia_meta
-            if abs(error) < 0.03: # margen de error
-                rumbo_objetivo = 0.0
+            if abs(error) < 0.03:  # Dentro de +-3 cm de 0.70 m: mantener rumbo base actual
+                rumbo_objetivo = self.rumbo_integral
             else:
-                rumbo_objetivo = max(-self.max_grados_rumbo, min(self.max_grados_rumbo, error * self.kp_rumbo))
+                # Acumular término integral si el robot sigue desviado
+                self.rumbo_integral += error * self.ki_rumbo * self.dt
+                self.rumbo_integral = max(
+                    -0.6 * self.max_grados_rumbo,
+                    min(0.6 * self.max_grados_rumbo, self.rumbo_integral),
+                )
+
+                termino_p = error * self.kp_rumbo
+                if abs(error) >= 0.04 and abs(termino_p) < self.min_grados_rumbo:
+                    termino_p = math.copysign(self.min_grados_rumbo, error)
+
+                rumbo_objetivo = max(
+                    -self.max_grados_rumbo,
+                    min(self.max_grados_rumbo, self.rumbo_integral + termino_p),
+                )
         else:
-            # En el espacio entre árboles (o durante el delay para el brazo), mantener 0.0° con la IMU
-            rumbo_objetivo = 0.0
+            # En el claro entre árboles o últimos 25 cm antes del tronco, mantener el rumbo base alineado
+            rumbo_objetivo = self.rumbo_integral
 
         # Limitador de pendiente (slew-rate) para que todo giro sea suave
         max_paso = self.slew_rate_deg_s * self.dt
@@ -417,8 +438,13 @@ class RealRutinaNavegacion(Node):
                 msg_vel.linear.x = self.velocidad_avance
                 self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
-                # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo
+                # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo.
+                # Al detenerse, real_stm32_bridge ejecuta RESET_TRACKING (fijando la orientación
+                # ya alineada frente al árbol como nuevo 0.0°), por lo que reiniciamos los acumuladores.
                 msg_vel.linear.x = 0.0
+                self.rumbo_integral = 0.0
+                self.rumbo_suavizado = 0.0
+                self.ultimo_rumbo_enviado = 0.0
                 self.orden_extender_enviada = False
                 self.orden_retraer_enviada = False
                 self.stm32_brazo_extendido = False

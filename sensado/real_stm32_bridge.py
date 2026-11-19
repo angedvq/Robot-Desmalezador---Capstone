@@ -223,15 +223,18 @@ class RealSTM32Bridge(Node):
         elif abs(self.velocidad) < 1e-4:
             if self.en_movimiento:
                 self.en_movimiento = False
+                self.ultimo_rumbo = 0.0
 
                 # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
                 ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
 
                 # Según Src/logica.c en stm_capstone:
-                # STOP_Mov() ejecuta BLOCK_Heading() (heading_block=1) y SET_VelRef(0),
-                # pero NO apaga tracking en mpu6500.c. Enviamos STOP_MOV y STOP_TRACKING
-                # para congelar el integrador del giroscopio mientras está detenido.
+                # 1. STOP_MOV (Orden 11): BLOCK_Heading() (heading_block=1) y SET_VelRef(0).
+                # 2. STOP_TRACKING (Orden 4): tracking=0 para no integrar deriva detenido.
+                # 3. RESET_TRACKING (Orden 2): int_heading=0 y heading_ref=0 para que la
+                #    orientación ya alineada frente al árbol sea el nuevo 0.0° limpio.
+                self.pendientes.appendleft((RESET_TRACKING, 0.0))
                 self.pendientes.appendleft((STOP_TRACKING, 0.0))
                 self.pendientes.appendleft((STOP_MOV, 0.0))
 
