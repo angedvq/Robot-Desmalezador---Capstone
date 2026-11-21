@@ -81,9 +81,7 @@ class RealRutinaNavegacion(Node):
         self.dist_sub = self.create_subscription(Float32, '/lidar/distancia_tronco_lateral', self.dist_tronco_callback, 10)
         self.obs_sub = self.create_subscription(Bool, '/obstaculo_frontal', self.obs_callback, 10)
         self.tfmini_sub = self.create_subscription(LaserScan, '/tf_mini/scan', self.tfmini_callback, 10)
-        self.estado_brazo_sub = self.create_subscription(
-            Int32, '/stm32/estado_brazo', self.estado_brazo_callback, 10
-        )
+        self.estado_brazo_sub = self.create_subscription(Int32, '/stm32/estado_brazo', self.estado_brazo_callback, 10)
 
         # ---------------------------------------------------------------------
         # Variables de estado y temporizadores
@@ -138,21 +136,21 @@ class RealRutinaNavegacion(Node):
     def estado_brazo_callback(self, msg: Int32):
         """
         Recibe los avisos de fin de movimiento del brazo desde la STM32:
-        - 4 (STM32_BRAZO_EXTENDIDO): El stepper terminó de extenderse por completo.
-        - 3 (STM32_BRAZO_RETRAIDO):  El stepper terminó de retraerse por completo.
+        - 4 (STM32_BRAZO_EXTENDIDO): El stepper terminó de extenderse 
+        - 3 (STM32_BRAZO_RETRAIDO):  El stepper terminó de retraerse
         """
         codigo = int(msg.data)
         if codigo == STM32_BRAZO_EXTENDIDO:
             self.stm32_brazo_extendido = True
             self.get_logger().info(
-                "[STM32 -> Navegación] Código 4 recibido: Brazo totalmente EXTENDIDO."
+                "[STM32 -> Navegación] Código 4 recibido: Brazo EXTENDIDO."
             )
         elif codigo == STM32_BRAZO_RETRAIDO:
             self.stm32_brazo_retraido = True
             self.brazo_extendido = False
             self.brazo_retraido_confirmado = True
             self.get_logger().info(
-                "[STM32 -> Navegación] Código 3 recibido: Brazo totalmente RETRAÍDO."
+                "[STM32 -> Navegación] Código 3 recibido: Brazo RETRAÍDO."
             )
     def tree_callback(self, msg: PoseArray):
         """Recibe las detecciones de troncos en la ventana lateral"""
@@ -340,8 +338,8 @@ class RealRutinaNavegacion(Node):
         tfmini_ok = ((not self.usar_tfmini) or (self.ultimo_tfmini_ts is not None and (now - self.ultimo_tfmini_ts) <= self.tfmini_timeout))
 
         # Si algun sensor no está funcionando mientras el robot se desplaza, freno de emergencia.
-        # Nota: Si ya está detenido accionando el brazo, no enviamos STOP_All por un parpadeo
-        # de sensor para no cortar el recorrido del motor stepper a mitad de camino.
+        # Si ya está detenido accionando el brazo, NO enviamos STOP_All 
+        # para no interrumpir el recorrido del stepper
         if (not lidar_ok or not tfmini_ok) and not operando_brazo_detenido:
             if not self.en_pausa_por_watchdog:
                 self._pausar_relojes(now)
@@ -455,25 +453,23 @@ class RealRutinaNavegacion(Node):
                 self.get_logger().info(
                     f"Brazo alineado con tronco {self.arboles_procesados}. "
                     f"Deteniendo ruedas y extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
-                    "(esperando confirmación código 4 de STM32)..."
                 )
 
         elif self.estado_actual == 'EXTENDIENDO_BRAZO':
             # Ruedas detenidas mientras el motor stepper recorre los +600 mm hasta que la STM32 envíe código 4
             msg_vel.linear.x = 0.0
 
-            # Enviar la orden de extender tras 0.10 s de haber frenado las ruedas (STOP_Mov ya enviado)
+            # Enviar la orden de extender tras 0.10 s de haber frenado las ruedas
             if not self.orden_extender_enviada and tiempo_transcurrido >= 0.10:
                 self.stm32_brazo_extendido = False
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
 
-            # Pasa al estado de espera de 4s únicamente cuando la STM32 confirma código 4 (brazo totalmente extendido)
+            # Pasa al estado de espera de 4s únicamente cuando la STM32 confirma código 4 (brazo extendido)
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
                 self.estado_actual = 'MANTENIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
-                    f"STM32 confirmó brazo totalmente extendido (código 4). "
                     f"Manteniendo robot detenido con brazo extendido por {self.tiempo_brazo_extendido:.1f}s..."
                 )
 
@@ -490,7 +486,6 @@ class RealRutinaNavegacion(Node):
                 self.get_logger().info(
                     f"Espera con brazo extendido completada ({tiempo_transcurrido:.1f}s). "
                     f"Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm "
-                    "(esperando confirmación código 3 de STM32)..."
                 )
 
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
@@ -505,7 +500,7 @@ class RealRutinaNavegacion(Node):
                     self.detener_todo_emergencia()
                     self.get_logger().info(
                         f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles procesados). "
-                        "STM32 confirmó brazo retraído (código 3) y robot detenido por completo."
+                        "Brazo retraído y robot detenido por completo."
                     )
                     return
                 else:
@@ -513,7 +508,7 @@ class RealRutinaNavegacion(Node):
                     self.tiempo_inicio_estado = now
                     self.tiempo_ultimo_arbol = now
                     self.get_logger().info(
-                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado y brazo retraído (código 3 STM32). "
+                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado y brazo retraído"
                         f"Reanudando marcha (enfriamiento de {self.tiempo_enfriamiento:.1f}s)..."
                     )
 

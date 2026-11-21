@@ -310,7 +310,7 @@ class RealPercepcionTroncos(Node):
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
 
-        # 1. Conos visuales de las dos zonas de detección del LiDAR
+        # Conos visuales de las dos zonas de detección del LiDAR
         marker_array.markers.append(
             self._crear_cono_fov_rviz(
                 stamp, frame_id, m_id=100,
@@ -326,7 +326,7 @@ class RealPercepcionTroncos(Node):
             )
         )
 
-        # 2. Marker del ÁRBOL PRÓXIMO / LOOKAHEAD (Zona de guiado: CIAN + Línea Amarilla)
+        # Marker del arbol proximo/lookahead
         if tronco_proximo is not None:
             _, y_r, r_t, cx_l, cy_l = tronco_proximo
             m_prox = Marker()
@@ -375,7 +375,7 @@ class RealPercepcionTroncos(Node):
             m_txt.text = f"ARBOL PROXIMO (Y={y_r:.2f}m | R={r_t*100:.1f}cm)"
             marker_array.markers.append(m_txt)
 
-        # 3. Marker del ÁRBOL LATERAL (Zona de disparo [-100°, -80°]: NARANJA -> VERDE)
+        # Marker delarbol lateral (Zona de disparo -100°, -80°)
         if tronco_disparo is not None:
             _, y_r, r_t, cx_l, cy_l = tronco_disparo
             m_lat = Marker()

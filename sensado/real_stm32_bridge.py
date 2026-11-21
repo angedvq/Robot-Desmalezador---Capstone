@@ -26,7 +26,7 @@ STOP_ALL = 9        # Detiene todo: ruedas, stepper y bomba
 START_MOV = 10      # Inicia movimiento (m/s), fija rumbo actual como 0° y enciende IMU
 STOP_MOV = 11       # Detiene solo las ruedas, mantiene rumbo actual y apaga IMU
 
-# Códigos recibidos desde la STM32 (2 bytes: [codigo, codigo ^ 0xA5])
+# Códigos recibidos desde la STM32 
 BRAZO_RETRAIDO = 3   # Brazo totalmente retraído (Brazo home)
 BRAZO_EXTENDIDO = 4  # Brazo totalmente extendido (Brazo end)
 
@@ -34,8 +34,8 @@ MENSAJES_STM32 = {
     0: "Error de comunicación",
     1: "Caída de voltaje",
     2: "Fallo bomba",
-    BRAZO_RETRAIDO: "Brazo totalmente retraído (Brazo home)",
-    BRAZO_EXTENDIDO: "Brazo totalmente extendido (Brazo end)",
+    BRAZO_RETRAIDO: "Brazo totalmente retraído",
+    BRAZO_EXTENDIDO: "Brazo totalmente extendido",
 }
 
 
@@ -92,8 +92,7 @@ class RealSTM32Bridge(Node):
         self.create_timer(0.05, self.enviar_pendiente) 
 
         self.get_logger().info(
-            f"real_stm32_bridge iniciado en {port} ({baudrate} bps) | "
-            "Soporte STOP_Mov (árboles/brazo) + STOP_All (emergencia)"
+            f"real_stm32_bridge iniciado en {port} ({baudrate} bps)"
         )
 
     # =========================================================================
@@ -160,10 +159,10 @@ class RealSTM32Bridge(Node):
     # =========================================================================
     def _leer_mensajes_stm32(self):
         """
-        Lee paquetes de 2 bytes enviados desde la STM32 ([codigo, codigo ^ 0xA5]):
-        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All internamente).
-        - 3: Brazo totalmente retraído (Brazo home).
-        - 4: Brazo totalmente extendido (Brazo end).
+        Lee paquetes de 2 bytes enviados desde la STM32:
+        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All).
+        - 3: Brazo totalmente retraído.
+        - 4: Brazo totalmente extendido.
         """
         try:
             waiting = self.uart.in_waiting
@@ -228,12 +227,6 @@ class RealSTM32Bridge(Node):
                 # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
                 ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-
-                # Según Src/logica.c en stm_capstone:
-                # 1. STOP_MOV (Orden 11): BLOCK_Heading() (heading_block=1) y SET_VelRef(0).
-                # 2. STOP_TRACKING (Orden 4): tracking=0 para no integrar deriva detenido.
-                # 3. RESET_TRACKING (Orden 2): int_heading=0 y heading_ref=0 para que la
-                #    orientación ya alineada frente al árbol sea el nuevo 0.0° limpio.
                 self.pendientes.appendleft((RESET_TRACKING, 0.0))
                 self.pendientes.appendleft((STOP_TRACKING, 0.0))
                 self.pendientes.appendleft((STOP_MOV, 0.0))
@@ -248,10 +241,7 @@ class RealSTM32Bridge(Node):
             if not self.en_movimiento:
                 self.en_movimiento = True
                 self.primer_arranque = False
-                # Según Src/logica.c y Src/ruedas.c en stm_capstone:
-                # START_Mov (Orden 10) ejecuta START_Tracking(), UNBLOCK_Heading() (heading_block=0)
-                # y SET_VelRef(vel), SIN reiniciar int_heading (solo Orden 2 RESET_Tracking lo reinicia).
-                # Es indispensable enviar START_MOV al reanudar tras cada árbol porque es la única
+                # Llamar a START_MOV al reanudar tras cada árbol porque es la única
                 # orden del firmware STM32 que llama a UNBLOCK_Heading().
                 self.pendientes.append((START_MOV, self.velocidad))
                 self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
