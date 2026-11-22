@@ -85,6 +85,7 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
     resultado = {
         'tronco_en_disparo': None,
         'tronco_proximo': None,
+        'tronco_alineacion': None,
         'distancia_lateral_guia': None,
         'todos_los_troncos': [],
     }
@@ -106,6 +107,7 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
 
     candidatos_disparo = []
     candidatos_guia = []
+    candidatos_alineacion = []
 
     # Analizar cada cluster detectado
     for label in set(labels):
@@ -152,6 +154,10 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
         if en_disparo:
             candidatos_disparo.append((dist_to_center, x_robot, y_robot, r, cx_l, cy_l))
 
+        # Ventana para triangular la alineación del brazo trasero (x_robot entre -0.55 m y +0.25 m)
+        if -0.55 <= x_robot <= 0.25:
+            candidatos_alineacion.append((abs(x_robot), dist_to_center, x_robot, y_robot, r, cx_l, cy_l))
+
         # Para el guiado lateral a 0.70 m consideramos únicamente troncos por delante
         # del LiDAR (0.25 m <= x_robot <= 2.0 m), dejando los últimos 25 cm para pasar recto
         if 0.25 <= x_robot <= 2.0:
@@ -163,6 +169,12 @@ def detectar_troncos(angles,ranges,range_min_msg,range_max_msg,fov_busqueda_min,
         candidatos_disparo.sort(key=lambda item: item[0])
         _, x_r, y_r, r_t, cx_l, cy_l = candidatos_disparo[0]
         resultado['tronco_en_disparo'] = (x_r, y_r, r_t, cx_l, cy_l)
+
+    if candidatos_alineacion:
+        # Elegir el tronco lateral/trasero más cercano al costado del robot para triangular el brazo
+        candidatos_alineacion.sort(key=lambda item: item[1])
+        _, d_diag, x_r, y_r, r_t, cx_l, cy_l = candidatos_alineacion[0]
+        resultado['tronco_alineacion'] = (x_r, y_r, d_diag, r_t, cx_l, cy_l)
 
     if candidatos_guia:
         # Elegir el tronco válido más cercano para guiar la distancia lateral a la hilera
@@ -185,10 +197,10 @@ class RealPercepcionTroncos(Node):
         self.declare_parameter('fov_disparo_min_deg', -100.0)
         self.declare_parameter('fov_disparo_max_deg', -80.0)
 
-        # Ventana amplia de búsqueda y guiado lateral hacia la hilera de árboles
-        # cubre desde la diagonal frontal-izquierda hasta el lateral
+        # Ventana amplia de búsqueda, guiado lateral y triangulación trasera del brazo
+        # cubre desde la diagonal frontal-izquierda (-160°) hasta la diagonal trasera-izquierda (-40°)
         self.declare_parameter('fov_busqueda_min_deg', -160.0)
-        self.declare_parameter('fov_busqueda_max_deg', -60.0)
+        self.declare_parameter('fov_busqueda_max_deg', -40.0)
 
         # Distancias y radios válidos de tronco (m)
         self.declare_parameter('roi_min_dist', 0.15)
@@ -222,6 +234,10 @@ class RealPercepcionTroncos(Node):
 
         # Publica la distancia perpendicular (m) al tronco para mantener los 0.7 m
         self.dist_lat_pub = self.create_publisher(Float32, '/lidar/distancia_tronco_lateral', 10)
+
+        # Publica la posición relativa del tronco lateral/trasero (x_robot, y_robot, dist_diagonal)
+        # para triangular con precisión la posición del brazo (ubicado 25-30 cm detrás del LiDAR)
+        self.pos_alineacion_pub = self.create_publisher(Point, '/lidar/posicion_tronco_alineacion', 10)
 
         # Marcadores 3D para RViz
         self.marker_pub = self.create_publisher(MarkerArray, '/tree_markers', 10)
@@ -259,6 +275,19 @@ class RealPercepcionTroncos(Node):
         else:
             msg_dist.data = float('nan')
         self.dist_lat_pub.publish(msg_dist)
+
+        # Publicar posición de triangulación del tronco lateral/trasero para alinear el brazo
+        msg_alin = Point()
+        if info['tronco_alineacion'] is not None:
+            x_r_al, y_r_al, d_diag_al, _, _, _ = info['tronco_alineacion']
+            msg_alin.x = float(x_r_al)
+            msg_alin.y = float(y_r_al)
+            msg_alin.z = float(d_diag_al)
+        else:
+            msg_alin.x = float('nan')
+            msg_alin.y = float('nan')
+            msg_alin.z = float('nan')
+        self.pos_alineacion_pub.publish(msg_alin)
 
         # Conteo de confirmaciones consecutivas en la ventana lateral
         tronco_disparo = info['tronco_en_disparo']

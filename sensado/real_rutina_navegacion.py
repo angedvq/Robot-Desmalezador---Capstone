@@ -3,7 +3,7 @@ import math
 import time
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseArray
+from geometry_msgs.msg import Twist, PoseArray, Point
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, Int32
 
@@ -38,7 +38,8 @@ class RealRutinaNavegacion(Node):
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 50.0)    
-        self.declare_parameter('tiempo_delay_brazo', 1.5)         # Delay tras detección LiDAR para alinear brazo (s)
+        self.declare_parameter('distancia_lidar_brazo', 0.28)     # Separación longitudinal entre LiDAR y brazo (28 cm)
+        self.declare_parameter('tiempo_delay_brazo', 2.2)         # Timeout máximo de respaldo para alinear brazo (s)
         self.declare_parameter('tiempo_brazo_extendido', 4.0)     # Tiempo detenido con el brazo ya extendido (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)        # Ceguera temporal para avanzar a sgte tronco (s)
         self.declare_parameter('desplazamiento_brazo_mm', 600.0)  # +600 mm (+60 cm) extiende, -600 mm retrae
@@ -65,6 +66,7 @@ class RealRutinaNavegacion(Node):
 
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
+        self.distancia_lidar_brazo = abs(float(self.get_parameter('distancia_lidar_brazo').value))
         self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_brazo_extendido = float(self.get_parameter('tiempo_brazo_extendido').value)
         self.tiempo_enfriamiento = float(self.get_parameter('tiempo_enfriamiento').value)
@@ -87,6 +89,9 @@ class RealRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         self.tree_sub = self.create_subscription(PoseArray, '/arboles_detectados', self.tree_callback, 10)
         self.dist_sub = self.create_subscription(Float32, '/lidar/distancia_tronco_lateral', self.dist_tronco_callback, 10)
+        self.pos_alin_sub = self.create_subscription(
+            Point, '/lidar/posicion_tronco_alineacion', self.pos_alineacion_callback, 10
+        )
         self.obs_sub = self.create_subscription(Bool, '/obstaculo_frontal', self.obs_callback, 10)
         self.tfmini_sub = self.create_subscription(LaserScan, '/tf_mini/scan', self.tfmini_callback, 10)
         self.estado_brazo_sub = self.create_subscription(Int32, '/stm32/estado_brazo', self.estado_brazo_callback, 10)
@@ -104,9 +109,13 @@ class RealRutinaNavegacion(Node):
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = True
 
-        # Variables de guiado lateral y rumbo IMU (PID + adaptación de velocidad)
+        # Variables de guiado lateral, triangulación del brazo y rumbo IMU (PID + adaptación de velocidad)
         self.distancia_tronco_actual = None
         self.ultimo_tronco_guia_ts = None
+        self.tronco_alineacion_x = None
+        self.tronco_alineacion_y = None
+        self.tronco_alineacion_diag = None
+        self.ultimo_tronco_alin_ts = None
         self.error_previo = None
         self.derivada_error_filtrada = 0.0
         self.rumbo_integral = 0.0
@@ -136,7 +145,7 @@ class RealRutinaNavegacion(Node):
 
         self.get_logger().info(
             f"real_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
-            f"Delay alineación: {self.tiempo_delay_brazo:.1f}s | "
+            f"Triangulación brazo-LiDAR: {self.distancia_lidar_brazo * 100.0:.0f}cm (timeout respaldo: {self.tiempo_delay_brazo:.1f}s) | "
             f"Espera con brazo extendido: {self.tiempo_brazo_extendido:.1f}s | "
             f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm (confirmación por STM32: 4=ext, 3=ret)"
         )
@@ -191,6 +200,29 @@ class RealRutinaNavegacion(Node):
             self.distancia_tronco_actual = None
             self.error_previo = None
             self.derivada_error_filtrada = 0.0
+
+    def pos_alineacion_callback(self, msg: Point):
+        """
+        Recibe desde /lidar/posicion_tronco_alineacion las coordenadas del tronco que
+        está siendo rebasado por el LiDAR:
+        - msg.x: x_robot (m) -> negativo cuando el LiDAR ya adelantó al tronco.
+                 Cuando x_robot <= -distancia_lidar_brazo (-0.28 m), el brazo trasero
+                 queda exactamente centrado con el tronco.
+        - msg.y: y_robot (m) -> distancia lateral perpendicular al tronco.
+        - msg.z: d_diag (m)  -> distancia diagonal real entre el LiDAR y el centro del tronco
+                 (hipotenusa del triángulo rectángulo: d_obj = sqrt(y_robot^2 + L_brazo^2)).
+        """
+        now = time.monotonic()
+        self.ultimo_lidar_ts = now
+        if math.isfinite(msg.x) and math.isfinite(msg.y) and math.isfinite(msg.z):
+            self.tronco_alineacion_x = float(msg.x)
+            self.tronco_alineacion_y = float(msg.y)
+            self.tronco_alineacion_diag = float(msg.z)
+            self.ultimo_tronco_alin_ts = now
+        else:
+            self.tronco_alineacion_x = None
+            self.tronco_alineacion_y = None
+            self.tronco_alineacion_diag = None
 
     def obs_callback(self, msg: Bool):
         """Recibe flag de obstáculo frontal desde procesamiento_tfmini"""
@@ -509,15 +541,56 @@ class RealRutinaNavegacion(Node):
                 self.tiempo_inicio_estado = now
                 self.tiempo_ultimo_arbol = now
                 self.estado_actual = 'ALINEANDO_BRAZO'
+                y_ref = (
+                    self.tronco_alineacion_y
+                    if self.tronco_alineacion_y is not None
+                    else self.distancia_meta
+                )
+                d_diag_obj = math.hypot(y_ref, self.distancia_lidar_brazo)
                 self.get_logger().info(
-                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
-                    f"Alineando brazo por {self.tiempo_delay_brazo:.1f}s"
+                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado a la altura del LiDAR. "
+                    f"Triangulando brazo: avanzando hasta que el LiDAR supere al tronco por "
+                    f"{self.distancia_lidar_brazo * 100.0:.0f} cm (diag objetivo ~{d_diag_obj * 100.0:.1f} cm)"
                 )
 
         elif self.estado_actual == 'ALINEANDO_BRAZO':
-            # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
-            if tiempo_transcurrido < self.tiempo_delay_brazo:
-                msg_vel.linear.x = self.velocidad_avance
+            # Triangulación con el LiDAR para centrar el brazo (ubicado `distancia_lidar_brazo` detrás del LiDAR):
+            # Formamos el triángulo rectángulo entre:
+            # - Cateto lateral `y_robot`: distancia perpendicular del tronco al robot (~0.70 m).
+            # - Cateto longitudinal `L_brazo = distancia_lidar_brazo`: separación LiDAR-brazo (0.28 m).
+            # - Hipotenusa `d_diag_objetivo = sqrt(y_robot^2 + L_brazo^2)` (~0.754 m cuando y_robot = 0.70 m).
+            # El brazo queda centrado frente al tronco cuando el LiDAR ya pasó al árbol (`x_robot < 0`)
+            # y el cateto longitudinal alcanza `-L_brazo` (equivalentemente `d_diag >= d_diag_objetivo`).
+            lectura_alin_vigente = (
+                self.tronco_alineacion_x is not None
+                and self.tronco_alineacion_y is not None
+                and self.tronco_alineacion_diag is not None
+                and self.ultimo_tronco_alin_ts is not None
+                and (now - self.ultimo_tronco_alin_ts) <= 0.4
+            )
+
+            alineado_por_lidar = False
+            restante_longitudinal = self.distancia_lidar_brazo
+            d_diag_objetivo = math.hypot(self.distancia_meta, self.distancia_lidar_brazo)
+
+            if lectura_alin_vigente:
+                d_diag_objetivo = math.hypot(self.tronco_alineacion_y, self.distancia_lidar_brazo)
+                # Cuánto le falta avanzar al LiDAR para quedar `distancia_lidar_brazo` por delante del tronco
+                restante_longitudinal = self.tronco_alineacion_x + self.distancia_lidar_brazo
+                if (
+                    self.tronco_alineacion_x <= -self.distancia_lidar_brazo
+                    or (self.tronco_alineacion_x < -0.05 and self.tronco_alineacion_diag >= d_diag_objetivo)
+                ):
+                    alineado_por_lidar = True
+
+            timeout_respaldo = tiempo_transcurrido >= self.tiempo_delay_brazo
+
+            if not alineado_por_lidar and not timeout_respaldo:
+                # Si faltan <= 8 cm para llegar al centro del tronco, reducir a velocidad de aproximación fina (0.05 m/s)
+                if lectura_alin_vigente and restante_longitudinal <= 0.08:
+                    msg_vel.linear.x = self.velocidad_correccion
+                else:
+                    msg_vel.linear.x = self.velocidad_avance
                 self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo.
@@ -537,8 +610,18 @@ class RealRutinaNavegacion(Node):
                 self.brazo_retraido_confirmado = False
                 self.estado_actual = 'EXTENDIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
+
+                if alineado_por_lidar:
+                    motivo_alin = (
+                        f"Triangulación LiDAR completada (x={self.tronco_alineacion_x * 100.0:.1f} cm, "
+                        f"y={self.tronco_alineacion_y * 100.0:.1f} cm, "
+                        f"diag={self.tronco_alineacion_diag * 100.0:.1f}/{d_diag_objetivo * 100.0:.1f} cm)"
+                    )
+                else:
+                    motivo_alin = f"Timeout de respaldo alcanzado ({tiempo_transcurrido:.2f}s)"
+
                 self.get_logger().info(
-                    f"Brazo alineado con tronco {self.arboles_procesados}. "
+                    f"Brazo alineado con tronco {self.arboles_procesados} [{motivo_alin}]. "
                     f"Deteniendo ruedas y extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
                 )
 
