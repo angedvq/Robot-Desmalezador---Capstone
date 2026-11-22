@@ -48,10 +48,12 @@ class MapirRutinaNavegacion(Node):
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal (m/s)
 
         # Parámetros de corrección suave de rumbo (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 30.0)
-        self.declare_parameter('max_grados_rumbo', 10.0)
-        self.declare_parameter('slew_rate_deg_s', 6.0)
-        self.declare_parameter('alpha_dist', 0.40)
+        self.declare_parameter('kp_rumbo', 45.0)              # Ganancia proporcional (grados por metro de error)
+        self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
+        self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
+        self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
+        self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
+        self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
 
         # Parámetros de la rutina de árboles, inspección MAPIR y brazo
         self.declare_parameter('meta_arboles', 4)
@@ -73,6 +75,8 @@ class MapirRutinaNavegacion(Node):
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
         self.kp_rumbo = float(self.get_parameter('kp_rumbo').value)
+        self.ki_rumbo = float(self.get_parameter('ki_rumbo').value)
+        self.min_grados_rumbo = float(self.get_parameter('min_grados_rumbo').value)
         self.max_grados_rumbo = float(self.get_parameter('max_grados_rumbo').value)
         self.slew_rate_deg_s = float(self.get_parameter('slew_rate_deg_s').value)
         self.alpha_dist = float(self.get_parameter('alpha_dist').value)
@@ -143,6 +147,7 @@ class MapirRutinaNavegacion(Node):
         # Variables de guiado lateral y rumbo IMU
         self.distancia_tronco_actual = None
         self.ultimo_tronco_guia_ts = None
+        self.rumbo_integral = 0.0
         self.rumbo_suavizado = 0.0
         self.ultimo_rumbo_enviado = 0.0
         self.ultimo_envio_grados_ts = 0.0
@@ -300,6 +305,7 @@ class MapirRutinaNavegacion(Node):
         self.cmd_pub.publish(msg_vel)
 
         self.rumbo_suavizado = 0.0
+        self.rumbo_integral = 0.0
 
     def _pausar_relojes(self, now: float):
         """Congela los tiempos transcurridos durante una pausa por obstáculo o watchdog."""
@@ -310,6 +316,73 @@ class MapirRutinaNavegacion(Node):
         """Restaura los tiempos transcurridos al reanudarse la operación."""
         self.tiempo_inicio_estado = now - self.tiempo_transcurrido_guardado
         self.tiempo_ultimo_arbol = now - self.tiempo_sin_ver_arbol_guardado
+
+    def _actualizar_y_publicar_rumbo(self, now: float, permitir_correccion_lateral: bool):
+        """
+        Calcula y publica el rumbo objetivo hacia la STM32 por /navegacion/corregir_grados:
+        - Si `permitir_correccion_lateral` es True y hay un tronco guía reciente (< 0.5 s),
+          aplica control PI + ángulo mínimo efectivo (`min_grados_rumbo`) para vencer tanto
+          la fricción de las 4 ruedas como cualquier offset acumulado en `int_heading`.
+        - Cuando el error entra en la banda muerta (< 3 cm) o no hay tronco guía, mantiene
+          el rumbo base acumulado (`self.rumbo_integral`) en vez de forzar el 0° antiguo.
+        """
+        tronco_guia_vigente = (
+            permitir_correccion_lateral
+            and self.distancia_tronco_actual is not None
+            and self.ultimo_tronco_guia_ts is not None
+            and (now - self.ultimo_tronco_guia_ts) <= 0.5
+        )
+
+        # Si tenemos un tronco guia vigente, aplica corrección Proporcional + Integral
+        if tronco_guia_vigente:
+            error = self.distancia_tronco_actual - self.distancia_meta
+            if abs(error) < 0.03:  # Dentro de +-3 cm de 0.70 m: mantener rumbo base actual
+                rumbo_objetivo = self.rumbo_integral
+            else:
+                # Acumular término integral si el robot sigue desviado
+                self.rumbo_integral += error * self.ki_rumbo * self.dt
+                self.rumbo_integral = max(
+                    -0.6 * self.max_grados_rumbo,
+                    min(0.6 * self.max_grados_rumbo, self.rumbo_integral),
+                )
+
+                termino_p = error * self.kp_rumbo
+                if abs(error) >= 0.04 and abs(termino_p) < self.min_grados_rumbo:
+                    termino_p = math.copysign(self.min_grados_rumbo, error)
+
+                rumbo_objetivo = max(
+                    -self.max_grados_rumbo,
+                    min(self.max_grados_rumbo, self.rumbo_integral + termino_p),
+                )
+        else:
+            # En el claro entre árboles o últimos 25 cm antes del tronco, mantener el rumbo base alineado
+            rumbo_objetivo = self.rumbo_integral
+
+        # Limitador de pendiente (slew-rate) para que todo giro sea suave
+        max_paso = self.slew_rate_deg_s * self.dt
+        delta = rumbo_objetivo - self.rumbo_suavizado
+        if abs(delta) <= max_paso:
+            self.rumbo_suavizado = rumbo_objetivo
+        else:
+            self.rumbo_suavizado += math.copysign(max_paso, delta)
+
+        # Se envia orden a stm32 solo si hubo un cambio significante (0.5°) para no saturar
+        diferencia = abs(self.rumbo_suavizado - self.ultimo_rumbo_enviado)
+        retorno_a_cero = (self.rumbo_suavizado == 0.0 and self.ultimo_rumbo_enviado != 0.0)
+        requiere_refresco = (now - self.ultimo_envio_grados_ts) >= 1.0
+
+        if diferencia >= 0.5 or retorno_a_cero or requiere_refresco:
+            msg_grados = Float32()
+            msg_grados.data = float(self.rumbo_suavizado)
+            self.grados_pub.publish(msg_grados)
+
+            if diferencia >= 0.5 or retorno_a_cero:
+                ref_str = (f"Tronco a {self.distancia_tronco_actual:.2f}m" if tronco_guia_vigente else "Claro IMU 0°")
+                self.get_logger().info(
+                    f"[RUMBO] {ref_str} -> SET_Heading: {self.rumbo_suavizado:.1f}° "
+                    f"(obj: {rumbo_objetivo:.1f}°)")
+            self.ultimo_rumbo_enviado = self.rumbo_suavizado
+            self.ultimo_envio_grados_ts = now
 
     def _finalizar_o_continuar_siguiente_arbol(self, now: float, motivo_log: str):
         """
@@ -423,6 +496,7 @@ class MapirRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
 
             # Criterio de parada por timeout sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -449,9 +523,15 @@ class MapirRutinaNavegacion(Node):
             # Sigue avanzando durante tiempo_delay_brazo para alinear la parte trasera con el tronco
             if tiempo_transcurrido < self.tiempo_delay_brazo:
                 msg_vel.linear.x = self.velocidad_avance
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
-                # Detener ruedas (STOP_Mov) e iniciar inspección de maleza con la cámara MAPIR
+                # Detener ruedas (STOP_Mov) e iniciar inspección de maleza con la cámara MAPIR.
+                # Al detenerse, real_stm32_bridge ejecuta RESET_TRACKING (fijando la orientación
+                # ya alineada frente al árbol como nuevo 0.0°), por lo que reiniciamos los acumuladores.
                 msg_vel.linear.x = 0.0
+                self.rumbo_integral = 0.0
+                self.rumbo_suavizado = 0.0
+                self.ultimo_rumbo_enviado = 0.0
                 self.maleza_detectada_en_parada = False
                 self.max_cobertura_en_parada = 0.0
                 self.estado_actual = 'VERIFICANDO_MALEZA'
@@ -548,6 +628,7 @@ class MapirRutinaNavegacion(Node):
                 return
 
             msg_vel.linear.x = self.velocidad_avance
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
                 self.estado_actual = 'AVANZANDO'

@@ -223,12 +223,13 @@ class RealSTM32Bridge(Node):
         elif abs(self.velocidad) < 1e-4:
             if self.en_movimiento:
                 self.en_movimiento = False
+                self.ultimo_rumbo = 0.0
 
                 # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
                 ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
                 self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-
-                # Detener las ruedas y pausar IMU con STOP_Mov
+                self.pendientes.appendleft((RESET_TRACKING, 0.0))
+                self.pendientes.appendleft((STOP_TRACKING, 0.0))
                 self.pendientes.appendleft((STOP_MOV, 0.0))
 
             # Si hay órdenes en cola las enviamos; si la cola está vacía, mantenemos STOP_Mov
@@ -240,17 +241,11 @@ class RealSTM32Bridge(Node):
         else:
             if not self.en_movimiento:
                 self.en_movimiento = True
-                if self.primer_arranque:
-                    # Primer arranque del recorrido: fija 0° paralelo a la hilera y enciende IMU
-                    self.primer_arranque = False
-                    self.pendientes.append((START_MOV, self.velocidad))
-                    if abs(self.ultimo_rumbo) >= 0.01:
-                        self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
-                else:
-                    # Reanudación tras árbol u obstáculo: conserva la referencia 0° original
-                    self.pendientes.append((START_TRACKING, 0.0))
-                    self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
-                    self.pendientes.append((SET_VEL, self.velocidad))
+                self.primer_arranque = False
+                # Llamar a START_MOV al reanudar tras cada árbol porque es la única
+                # orden del firmware STM32 que llama a UNBLOCK_Heading().
+                self.pendientes.append((START_MOV, self.velocidad))
+                self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
 
             orden, valor = (self.pendientes.popleft() if self.pendientes else (SET_VEL, self.velocidad))
 
