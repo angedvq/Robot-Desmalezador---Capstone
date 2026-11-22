@@ -13,6 +13,10 @@ def generate_launch_description():
     distancia_meta = LaunchConfiguration('distancia_meta')
     distancia_frenado = LaunchConfiguration('distancia_frenado')
     velocidad_avance = LaunchConfiguration('velocidad_avance')
+    velocidad_correccion = LaunchConfiguration('velocidad_correccion')
+    kd_rumbo = LaunchConfiguration('kd_rumbo')
+    umbral_angulo_lento = LaunchConfiguration('umbral_angulo_lento')
+    umbral_angulo_reanudar = LaunchConfiguration('umbral_angulo_reanudar')
     meta_arboles = LaunchConfiguration('meta_arboles')
     timeout_sin_arbol = LaunchConfiguration('timeout_sin_arbol')
     tiempo_delay_brazo = LaunchConfiguration('tiempo_delay_brazo')
@@ -53,6 +57,26 @@ def generate_launch_description():
             'velocidad_avance',
             default_value='0.20',
             description='Velocidad lineal de avance del robot (m/s)',
+        ),
+        DeclareLaunchArgument(
+            'velocidad_correccion',
+            default_value='0.05',
+            description='Velocidad reducida al corregir ángulos de rumbo grandes (m/s)',
+        ),
+        DeclareLaunchArgument(
+            'kd_rumbo',
+            default_value='15.0',
+            description='Ganancia derivativa del control PID de rumbo (grados por m/s de variación de error)',
+        ),
+        DeclareLaunchArgument(
+            'umbral_angulo_lento',
+            default_value='12.0',
+            description='Ángulo de corrección (grados) desde el cual el robot baja su velocidad a velocidad_correccion',
+        ),
+        DeclareLaunchArgument(
+            'umbral_angulo_reanudar',
+            default_value='6.0',
+            description='Ángulo de corrección (grados) bajo el cual el robot vuelve a velocidad_avance',
         ),
         DeclareLaunchArgument(
             'meta_arboles',
@@ -156,6 +180,10 @@ def generate_launch_description():
                 'distancia_meta': distancia_meta,
                 'distancia_frenado': distancia_frenado,
                 'velocidad_avance': velocidad_avance,
+                'velocidad_correccion': velocidad_correccion,
+                'kd_rumbo': kd_rumbo,
+                'umbral_angulo_lento': umbral_angulo_lento,
+                'umbral_angulo_reanudar': umbral_angulo_reanudar,
                 'meta_arboles': meta_arboles,
                 'timeout_sin_arbol': timeout_sin_arbol,
                 'tiempo_delay_brazo': tiempo_delay_brazo,

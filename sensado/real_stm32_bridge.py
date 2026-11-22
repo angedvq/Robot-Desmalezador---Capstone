@@ -100,8 +100,16 @@ class RealSTM32Bridge(Node):
     # =========================================================================
     def recibir_velocidad(self, msg: Twist):
         """Actualiza la velocidad lineal de referencia recibida en /cmd_vel."""
-        self.velocidad = float(msg.linear.x)
+        nueva_vel = float(msg.linear.x)
+        cambio_vel = abs(nueva_vel - self.velocidad) >= 0.01
+        self.velocidad = nueva_vel
         self.ultimo_cmd = time.monotonic()
+
+        # Si ya está en movimiento y la rutina cambia de régimen de velocidad
+        # (ej. 0.20 m/s <-> 0.05 m/s durante corrección de ángulo grande),
+        # encolar SET_VEL de inmediato para no esperar a que se vacíe la cola de SET_HEADING.
+        if self.en_movimiento and not self.stop_solicitado and abs(nueva_vel) >= 1e-4 and cambio_vel:
+            self.pendientes.appendleft((SET_VEL, self.velocidad))
 
     def recibir_stop(self, msg: Bool):
         """Recibe bandera de parada total /navegacion/stop"""

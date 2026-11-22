@@ -21,15 +21,19 @@ class RealRutinaNavegacion(Node):
         # Parámetros geométricos y de avance
         self.declare_parameter('distancia_meta', 0.70)        # Distancia a la hilera (m)
         self.declare_parameter('distancia_frenado', 0.50)     # Umbral obstáculo TF-Mini (m)
-        self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal (m/s)
+        self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal habitual (m/s)
+        self.declare_parameter('velocidad_correccion', 0.05)  # Velocidad reducida al corregir ángulos grandes (m/s)
 
-        # Parámetros de corrección suave de rumbo (LiDAR + IMU)
+        # Parámetros de corrección suave de rumbo PID (LiDAR + IMU)
         self.declare_parameter('kp_rumbo', 45.0)              # Ganancia proporcional (grados por metro de error)
         self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
+        self.declare_parameter('kd_rumbo', 15.0)              # Ganancia derivativa (grados por m/s de variación de error)
         self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
         self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
         self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
+        self.declare_parameter('umbral_angulo_lento', 12.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
+        self.declare_parameter('umbral_angulo_reanudar', 6.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
@@ -48,12 +52,16 @@ class RealRutinaNavegacion(Node):
         self.distancia_meta = float(self.get_parameter('distancia_meta').value)
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
+        self.velocidad_correccion = float(self.get_parameter('velocidad_correccion').value)
         self.kp_rumbo = float(self.get_parameter('kp_rumbo').value)
         self.ki_rumbo = float(self.get_parameter('ki_rumbo').value)
+        self.kd_rumbo = float(self.get_parameter('kd_rumbo').value)
         self.min_grados_rumbo = float(self.get_parameter('min_grados_rumbo').value)
         self.max_grados_rumbo = float(self.get_parameter('max_grados_rumbo').value)
         self.slew_rate_deg_s = float(self.get_parameter('slew_rate_deg_s').value)
         self.alpha_dist = float(self.get_parameter('alpha_dist').value)
+        self.umbral_angulo_lento = float(self.get_parameter('umbral_angulo_lento').value)
+        self.umbral_angulo_reanudar = float(self.get_parameter('umbral_angulo_reanudar').value)
 
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
@@ -96,13 +104,16 @@ class RealRutinaNavegacion(Node):
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = True
 
-        # Variables de guiado lateral y rumbo IMU
+        # Variables de guiado lateral y rumbo IMU (PID + adaptación de velocidad)
         self.distancia_tronco_actual = None
         self.ultimo_tronco_guia_ts = None
+        self.error_previo = None
+        self.derivada_error_filtrada = 0.0
         self.rumbo_integral = 0.0
         self.rumbo_suavizado = 0.0
         self.ultimo_rumbo_enviado = 0.0
         self.ultimo_envio_grados_ts = 0.0
+        self.en_correccion_lenta = False
 
         # Watchdogs y estado de obstáculo frontal
         self.ultimo_lidar_ts = None
@@ -167,6 +178,8 @@ class RealRutinaNavegacion(Node):
             nueva = float(msg.data)
             if self.distancia_tronco_actual is None:
                 self.distancia_tronco_actual = nueva
+                self.error_previo = None
+                self.derivada_error_filtrada = 0.0
             else:
                 # Filtrar y suavizar conduccion
                 self.distancia_tronco_actual = (
@@ -176,6 +189,8 @@ class RealRutinaNavegacion(Node):
         else:
             # En el claro entre árboles no hay lectura lateral
             self.distancia_tronco_actual = None
+            self.error_previo = None
+            self.derivada_error_filtrada = 0.0
 
     def obs_callback(self, msg: Bool):
         """Recibe flag de obstáculo frontal desde procesamiento_tfmini"""
@@ -239,6 +254,9 @@ class RealRutinaNavegacion(Node):
 
         self.rumbo_suavizado = 0.0
         self.rumbo_integral = 0.0
+        self.error_previo = None
+        self.derivada_error_filtrada = 0.0
+        self.en_correccion_lenta = False
 
     def _pausar_relojes(self, now: float):
         """Congela los tiempos transcurridos durante una pausa por obstáculo o watchdog"""
@@ -254,10 +272,14 @@ class RealRutinaNavegacion(Node):
         """
         Calcula y publica el rumbo objetivo hacia la STM32 por /navegacion/corregir_grados:
         - Si `permitir_correccion_lateral` es True y hay un tronco guía reciente (< 0.5 s),
-          aplica control PI + ángulo mínimo efectivo (`min_grados_rumbo`) para vencer tanto
-          la fricción de las 4 ruedas como cualquier offset acumulado en `int_heading`.
+          aplica control PID (Proporcional + Integral + Derivativo) + ángulo mínimo efectivo
+          (`min_grados_rumbo`) para vencer la fricción de las 4 ruedas y amortiguar sobrepasos.
+        - Evalúa la magnitud del ángulo a corregir (`angulo_correccion`): si supera
+          `umbral_angulo_lento` (12° por defecto), activa `self.en_correccion_lenta = True`
+          para bajar la velocidad lineal a `velocidad_correccion` (0.05 m/s) hasta que el
+          ángulo se reduzca por debajo de `umbral_angulo_reanudar` (6° por defecto).
         - Cuando el error entra en la banda muerta (< 3 cm) o no hay tronco guía, mantiene
-          el rumbo base acumulado (`self.rumbo_integral`) en vez de forzar el 0° antiguo.
+          el rumbo base acumulado (`self.rumbo_integral`).
         """
         tronco_guia_vigente = (
             permitir_correccion_lateral
@@ -266,30 +288,88 @@ class RealRutinaNavegacion(Node):
             and (now - self.ultimo_tronco_guia_ts) <= 0.5
         )
 
-        # Si tenemos un tronco guia vigente, aplica corrección Proporcional + Integral
+        angulo_correccion = 0.0
+
+        # Si tenemos un tronco guia vigente, aplica corrección PID (Proporcional + Integral + Derivativa)
         if tronco_guia_vigente:
             error = self.distancia_tronco_actual - self.distancia_meta
+
+            # Cálculo del término derivativo filtrado sobre la evolución continua del error lateral
+            if self.error_previo is None:
+                self.derivada_error_filtrada = 0.0
+            else:
+                derivada_bruta = (error - self.error_previo) / self.dt
+                self.derivada_error_filtrada = (
+                    0.30 * derivada_bruta + 0.70 * self.derivada_error_filtrada
+                )
+            self.error_previo = error
+
             if abs(error) < 0.03:  # Dentro de +-3 cm de 0.70 m: mantener rumbo base actual
                 rumbo_objetivo = self.rumbo_integral
+                angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
             else:
-                # Acumular término integral si el robot sigue desviado
+                # 1. Término Integral (acotado al 60% del rumbo máximo)
                 self.rumbo_integral += error * self.ki_rumbo * self.dt
                 self.rumbo_integral = max(
                     -0.6 * self.max_grados_rumbo,
                     min(0.6 * self.max_grados_rumbo, self.rumbo_integral),
                 )
 
+                # 2. Término Proporcional con ángulo mínimo efectivo para mover las 4 ruedas
                 termino_p = error * self.kp_rumbo
                 if abs(error) >= 0.04 and abs(termino_p) < self.min_grados_rumbo:
                     termino_p = math.copysign(self.min_grados_rumbo, error)
 
+                # 3. Término Derivativo (acotado a +-12° para amortiguar sin amplificar ruido del LiDAR)
+                termino_d = max(
+                    -12.0,
+                    min(12.0, self.kd_rumbo * self.derivada_error_filtrada),
+                )
+
+                correccion_pd = termino_p + termino_d
                 rumbo_objetivo = max(
                     -self.max_grados_rumbo,
-                    min(self.max_grados_rumbo, self.rumbo_integral + termino_p),
+                    min(self.max_grados_rumbo, self.rumbo_integral + correccion_pd),
+                )
+
+                # Magnitud del ángulo que el robot necesita corregir en este instante
+                angulo_correccion = max(
+                    abs(correccion_pd),
+                    abs(rumbo_objetivo - self.rumbo_suavizado),
+                    abs(rumbo_objetivo),
                 )
         else:
             # En el claro entre árboles o últimos 25 cm antes del tronco, mantener el rumbo base alineado
+            self.error_previo = None
+            self.derivada_error_filtrada = 0.0
             rumbo_objetivo = self.rumbo_integral
+            angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
+
+        # ---------------------------------------------------------------------
+        # Lógica de separación de casos de velocidad según ángulo de corrección
+        # ---------------------------------------------------------------------
+        if not permitir_correccion_lateral or not tronco_guia_vigente:
+            if self.en_correccion_lenta:
+                self.en_correccion_lenta = False
+                self.get_logger().info(
+                    f"[VELOCIDAD] Fin de tramo de corrección -> "
+                    f"Restaurando velocidad habitual ({self.velocidad_avance:.2f} m/s)"
+                )
+        else:
+            if not self.en_correccion_lenta and angulo_correccion >= self.umbral_angulo_lento:
+                self.en_correccion_lenta = True
+                self.get_logger().info(
+                    f"[VELOCIDAD] Ángulo a corregir grande ({angulo_correccion:.1f}° >= "
+                    f"{self.umbral_angulo_lento:.1f}°) -> Reduciendo velocidad a "
+                    f"{self.velocidad_correccion:.2f} m/s para completar giro"
+                )
+            elif self.en_correccion_lenta and angulo_correccion <= self.umbral_angulo_reanudar:
+                self.en_correccion_lenta = False
+                self.get_logger().info(
+                    f"[VELOCIDAD] Ángulo corregido ({angulo_correccion:.1f}° <= "
+                    f"{self.umbral_angulo_reanudar:.1f}°) -> Restaurando velocidad habitual "
+                    f"({self.velocidad_avance:.2f} m/s)"
+                )
 
         # Limitador de pendiente (slew-rate) para que todo giro sea suave
         max_paso = self.slew_rate_deg_s * self.dt
@@ -311,9 +391,11 @@ class RealRutinaNavegacion(Node):
 
             if diferencia >= 0.5 or retorno_a_cero:
                 ref_str = (f"Tronco a {self.distancia_tronco_actual:.2f}m" if tronco_guia_vigente else "Claro IMU 0°")
+                vel_actual = self.velocidad_correccion if self.en_correccion_lenta else self.velocidad_avance
                 self.get_logger().info(
                     f"[RUMBO] {ref_str} -> SET_Heading: {self.rumbo_suavizado:.1f}° "
-                    f"(obj: {rumbo_objetivo:.1f}°)")
+                    f"(obj: {rumbo_objetivo:.1f}°, vel: {vel_actual:.2f} m/s)"
+                )
             self.ultimo_rumbo_enviado = self.rumbo_suavizado
             self.ultimo_envio_grados_ts = now
 
@@ -406,8 +488,10 @@ class RealRutinaNavegacion(Node):
                 self.cmd_pub.publish(msg_vel)
                 return
 
-            msg_vel.linear.x = self.velocidad_avance
             self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
+            msg_vel.linear.x = (
+                self.velocidad_correccion if self.en_correccion_lenta else self.velocidad_avance
+            )
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -443,6 +527,9 @@ class RealRutinaNavegacion(Node):
                 self.rumbo_integral = 0.0
                 self.rumbo_suavizado = 0.0
                 self.ultimo_rumbo_enviado = 0.0
+                self.error_previo = None
+                self.derivada_error_filtrada = 0.0
+                self.en_correccion_lenta = False
                 self.orden_extender_enviada = False
                 self.orden_retraer_enviada = False
                 self.stm32_brazo_extendido = False
