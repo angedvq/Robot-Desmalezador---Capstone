@@ -48,6 +48,10 @@ setup(
             'sim_cf_deteccion_troncos = sensado.simulaciones.sim_cf_deteccion_troncos:main',
             'sim_rutina_navegacion = sensado.simulaciones.sim_rutina_navegacion:main',
             'sim_stm32_bridge = sensado.simulaciones.sim_stm32_bridge:main',
+            'mapir_driver = sensado.integracion_mapir.mapir_driver:main',
+            'mapir_procesamiento_nir = sensado.integracion_mapir.mapir_procesamiento_nir:main',
+            'mapir_calibrador = sensado.integracion_mapir.mapir_calibrador:main',
+            'mapir_rutina_navegacion = sensado.integracion_mapir.mapir_rutina_navegacion:main',
         ],
     },
 )

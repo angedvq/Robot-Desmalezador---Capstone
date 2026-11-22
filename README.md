@@ -69,3 +69,42 @@ source install/setup.bash
 ros2 launch sensado real_rutina.launch.py distancia_meta:=0.70 meta_arboles:=4 tiempo_delay_brazo:=1.0 tiempo_brazo_extendido:=4.0 
 
 ```
+
+**=== Calibración Manual MAPIR ===**
+Para entornos nuevos, ejecutar de forma manual el calibrador de la mapir con un suelo y planta de referencia
+
+```
+ros2 run sensado mapir_driver
+```
+```
+ros2 run sensado mapir_calibrador
+
+```
+
+Por defecto, el nodo **mapir_procesamiento_nir.py** corre en modo_umbral := 'hibrido':       
+  
+  • En cada imagen que captura, calcula automáticamente la mediana de        
+  intensidad NIR de la escena (fondo_mediana), que corresponde a la          
+  reflectancia del suelo/tierra bajo la iluminación actual. Luego fija el umbral de corte dinámicamente en umbral\_efectivo
+  
+  • Cualquier planta cuya reflectancia NIR brille al menos +35     
+  niveles por encima del suelo actual (y supere el piso mínimo de 150) se    
+  segmenta como maleza.
+  
+  El calibrador **mapir_calibrador.py** separa automáticamente la imagen en dos poblaciones       
+  dentro de la ROI:
+      • Mediana(fondo): mide el nivel NIR del suelo/tierra que rodea a la    
+      planta.
+      • P99 (Percentil 99): mide el nivel NIR de las hojas de la planta de
+      referencia.
+  Con esos dos valores (suelo vs. planta bajo esa luz): 
+      • Si ve la planta (P99 - Mediana >= 30), reporta ESCENA CON CONTRASTE
+      (posible maleza en vista) y calcula el punto de corte óptimo al 55% del
+      camino entre el suelo y la planta (Mediana + 0.55 * (P99 - Mediana)). 
+      • Si solo hay suelo (P99 - Mediana < 30), 
+      reporta ESCENA UNIFORME y calcula el umbral de
+      seguridad 25 puntos por encima del ruido máximo del suelo (P95 + 25).
+  Imprime en consola los argumentos listos para copiar en   
+  **real_rutina.launch.py**
+
+
