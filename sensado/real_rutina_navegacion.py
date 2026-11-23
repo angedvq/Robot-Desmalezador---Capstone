@@ -88,6 +88,7 @@ class RealRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         self.estado_actual = 'AVANZANDO'
         self.arboles_procesados = 0
+        self.arboles_con_maleza = 0
         self.arbol_en_mira = False
         self.brazo_extendido = False
         self.orden_extender_enviada = False
@@ -95,6 +96,15 @@ class RealRutinaNavegacion(Node):
         self.stm32_brazo_extendido = False
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = True
+
+        # Métricas acumuladas para el reporte final de la rutina
+        self.inicio_rutina_ts = None
+        self.tiempo_rutina_total = 0.0
+        self.distancia_recorrida = 0.0
+        self.velocidad_promedio = 0.0
+        self.rutina_finalizada = False
+        self.motivo_fin_rutina = ""
+        self.ciclos_cierre = 0
 
         # Variables de guiado lateral y rumbo IMU
         self.distancia_tronco_actual = None
@@ -250,6 +260,35 @@ class RealRutinaNavegacion(Node):
         self.tiempo_inicio_estado = now - self.tiempo_transcurrido_guardado
         self.tiempo_ultimo_arbol = now - self.tiempo_sin_ver_arbol_guardado
 
+    def _finalizar_rutina_con_reporte(self, motivo: str):
+        """
+        Detiene el robot, imprime el reporte completo en consola
+        y activa la secuencia de cierre limpio del nodo.
+        """
+        self.estado_actual = 'FINALIZADO'
+        self.motivo_fin_rutina = motivo
+        self.detener_todo_emergencia()
+
+        if not self.rutina_finalizada:
+            self.rutina_finalizada = True
+            self.ciclos_cierre = 0
+            minutos = int(self.tiempo_rutina_total // 60)
+            segundos = self.tiempo_rutina_total % 60.0
+            reporte = (
+                "\n"
+                "============================================================\n"
+                "                 REPORTE FINAL DE LA RUTINA                 \n"
+                "============================================================\n"
+                f" Motivo de término   : {self.motivo_fin_rutina}\n"
+                f" Tiempo de rutina    : {self.tiempo_rutina_total:.2f} s ({minutos}m {segundos:04.1f}s)\n"
+                f" Velocidad promedio  : {self.velocidad_promedio:.3f} m/s "
+                f"(distancia est.: {self.distancia_recorrida:.2f} m)\n"
+                f" Árboles encontrados : {self.arboles_procesados} / {self.meta_arboles}\n"
+                f" Malezas encontradas : {self.arboles_con_maleza}\n"
+                "============================================================"
+            )
+            self.get_logger().info(reporte)
+
     def _actualizar_y_publicar_rumbo(self, now: float, permitir_correccion_lateral: bool):
         """
         Calcula y publica el rumbo objetivo hacia la STM32 por /navegacion/corregir_grados:
@@ -323,9 +362,13 @@ class RealRutinaNavegacion(Node):
     def control_loop(self):
         now = time.monotonic()
 
-        # Si la rutina ya terminó, mantener todo apagado con STOP_All
+        # Si la rutina ya terminó, mantener todo apagado con STOP_All y cerrar el nodo
         if self.estado_actual == 'FINALIZADO':
             self.detener_todo_emergencia()
+            self.ciclos_cierre += 1
+            if self.ciclos_cierre >= 4:
+                self.control_timer.cancel()
+                raise SystemExit(0)
             return
 
         # Verificación de Watchdogs de Sensores. Revisa si pasó mucho tiempo desde la ultima recepcion de datos de sensores
@@ -359,6 +402,8 @@ class RealRutinaNavegacion(Node):
 
         # Si todo esta ok, quitar la pausa
         elif self.en_pausa_por_watchdog and lidar_ok and tfmini_ok:
+            if self.inicio_rutina_ts is None:
+                self.inicio_rutina_ts = now
             self._restaurar_relojes(now)
             self.en_pausa_por_watchdog = False
             self.get_logger().info("Sensores ok. Iniciando/reanudando rutina de árboles")
@@ -411,11 +456,12 @@ class RealRutinaNavegacion(Node):
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
-                self.estado_actual = 'FINALIZADO'
-                self.detener_todo_emergencia()
                 self.get_logger().error(
-                    f"TIMEOUT: {tiempo_sin_ver_arbol:.1f}s sin detectar ningún árbol "
-                    f"Deteniendo robot"
+                    f"TIMEOUT: {tiempo_sin_ver_arbol:.1f}s sin detectar ningún árbol. "
+                    "Deteniendo robot y generando reporte final."
+                )
+                self._finalizar_rutina_con_reporte(
+                    motivo=f"Timeout ({tiempo_sin_ver_arbol:.1f}s sin detectar árboles)"
                 )
                 return
 
@@ -464,6 +510,7 @@ class RealRutinaNavegacion(Node):
                 self.stm32_brazo_extendido = False
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
+                self.arboles_con_maleza += 1
 
             # Pasa al estado de espera de 4s únicamente cuando la STM32 confirma código 4 (brazo extendido)
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
@@ -496,11 +543,12 @@ class RealRutinaNavegacion(Node):
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
                 self.brazo_retraido_confirmado = True
                 if self.arboles_procesados >= self.meta_arboles:
-                    self.estado_actual = 'FINALIZADO'
-                    self.detener_todo_emergencia()
                     self.get_logger().info(
                         f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles procesados). "
                         "Brazo retraído y robot detenido por completo."
+                    )
+                    self._finalizar_rutina_con_reporte(
+                        motivo=f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles)"
                     )
                     return
                 else:
@@ -532,13 +580,20 @@ class RealRutinaNavegacion(Node):
 
         self.cmd_pub.publish(msg_vel)
 
+        # Actualizar tiempo de rutina y velocidad promedio para el reporte final
+        if self.inicio_rutina_ts is not None and not self.rutina_finalizada:
+            self.tiempo_rutina_total += self.dt
+            self.distancia_recorrida += abs(float(msg_vel.linear.x)) * self.dt
+            if self.tiempo_rutina_total > 1e-6:
+                self.velocidad_promedio = self.distancia_recorrida / self.tiempo_rutina_total
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = RealRutinaNavegacion()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         if rclpy.ok():
