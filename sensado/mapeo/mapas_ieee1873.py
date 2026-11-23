@@ -18,7 +18,7 @@ def _detectar_carpeta_mapeo_fuente() -> str:
     """
     dir_actual = os.path.dirname(os.path.abspath(__file__))
     # Si se ejecuta desde install/, buscar la carpeta src/sensado/sensado/mapeo del workspace
-    candidato_ws = os.path.expanduser('~/Capstone/ros2_ws/src/sensado/sensado/mapeo')
+    candidato_ws = os.path.expanduser('~/sensado/mapeo')
     if os.path.isdir(candidato_ws):
         return candidato_ws
     return dir_actual
