@@ -19,15 +19,15 @@ class RealRutinaNavegacion(Node):
         # Declaración de parámetros 
         # ---------------------------------------------------------------------
         # Parámetros geométricos y de avance
-        self.declare_parameter('distancia_meta', 0.95)        # Distancia a la hilera (m)
+        self.declare_parameter('distancia_meta', 0.85)        # Distancia a la hilera (m)
         self.declare_parameter('distancia_frenado', 0.50)     # Umbral obstáculo TF-Mini (m)
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal habitual (m/s)
-        self.declare_parameter('velocidad_correccion', 0.05)  # Velocidad reducida al corregir ángulos grandes (m/s)
+        self.declare_parameter('velocidad_correccion', 0.065)  # Velocidad reducida al corregir ángulos grandes (m/s)
 
         # Parámetros de corrección suave de rumbo PID (LiDAR + IMU)
         self.declare_parameter('kp_rumbo', 30.0)              # Ganancia proporcional (grados por metro de error) kp=55
         self.declare_parameter('ki_rumbo', 5.0)              # Ganancia integral para vencer offset IMU y fricción ki=20
-        self.declare_parameter('kd_rumbo', 0.0)              # Ganancia derivativa (grados por m/s de variación de error) kp=15
+        self.declare_parameter('kd_rumbo', 5.0)              # Ganancia derivativa (grados por m/s de variación de error) kd=15
         self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
         self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
         self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro

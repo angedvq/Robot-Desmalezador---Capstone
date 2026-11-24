@@ -71,7 +71,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.95',
+            default_value='0.85',
             description='Distancia perpendicular objetivo a la hilera de árboles (m)',
         ),
         DeclareLaunchArgument(
@@ -86,12 +86,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'velocidad_correccion',
-            default_value='0.05',
+            default_value='0.065',
             description='Velocidad reducida al corregir ángulos de rumbo grandes (m/s)',
         ),
         DeclareLaunchArgument(
             'kd_rumbo',
-            default_value='0.0',
+            default_value='5.0',
             description='Ganancia derivativa del control PID de rumbo (grados por m/s de variación de error)',
         ),
         DeclareLaunchArgument(
