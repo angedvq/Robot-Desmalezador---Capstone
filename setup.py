@@ -48,6 +48,8 @@ setup(
             'sim_cf_deteccion_troncos = sensado.simulaciones.sim_cf_deteccion_troncos:main',
             'sim_rutina_navegacion = sensado.simulaciones.sim_rutina_navegacion:main',
             'sim_stm32_bridge = sensado.simulaciones.sim_stm32_bridge:main',
+            'odometria = sensado.mapeo.odometria:main',
+            'mapas_ieee1873 = sensado.mapeo.mapas_ieee1873:main',
         ],
     },
 )

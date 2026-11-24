@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -24,6 +26,29 @@ def generate_launch_description():
     tiempo_brazo_extendido = LaunchConfiguration('tiempo_brazo_extendido')
     desplazamiento_brazo_mm = LaunchConfiguration('desplazamiento_brazo_mm')
     usar_tfmini = LaunchConfiguration('usar_tfmini')
+
+    rutina_node = Node(
+        package='sensado',
+        executable='real_rutina_navegacion',
+        name='real_rutina_navegacion',
+        parameters=[{
+            'distancia_meta': distancia_meta,
+            'distancia_frenado': distancia_frenado,
+            'velocidad_avance': velocidad_avance,
+            'velocidad_correccion': velocidad_correccion,
+            'kd_rumbo': kd_rumbo,
+            'umbral_angulo_lento': umbral_angulo_lento,
+            'umbral_angulo_reanudar': umbral_angulo_reanudar,
+            'meta_arboles': meta_arboles,
+            'timeout_sin_arbol': timeout_sin_arbol,
+            'tiempo_barrido_brazo': tiempo_barrido_brazo,
+            'tiempo_delay_brazo': tiempo_delay_brazo,
+            'tiempo_brazo_extendido': tiempo_brazo_extendido,
+            'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
+            'usar_tfmini': usar_tfmini,
+        }],
+        output='screen',
+    )
 
     return LaunchDescription([
         # ---------------------------------------------------------------------
@@ -176,28 +201,30 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Control autónomo de rutina de árboles 
+        # Odometría y generación de mapa geométrico IEEE 1873
         # ---------------------------------------------------------------------
         Node(
             package='sensado',
-            executable='real_rutina_navegacion',
-            name='real_rutina_navegacion',
-            parameters=[{
-                'distancia_meta': distancia_meta,
-                'distancia_frenado': distancia_frenado,
-                'velocidad_avance': velocidad_avance,
-                'velocidad_correccion': velocidad_correccion,
-                'kd_rumbo': kd_rumbo,
-                'umbral_angulo_lento': umbral_angulo_lento,
-                'umbral_angulo_reanudar': umbral_angulo_reanudar,
-                'meta_arboles': meta_arboles,
-                'timeout_sin_arbol': timeout_sin_arbol,
-                'tiempo_barrido_brazo': tiempo_barrido_brazo,
-                'tiempo_delay_brazo': tiempo_delay_brazo,
-                'tiempo_brazo_extendido': tiempo_brazo_extendido,
-                'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
-                'usar_tfmini': usar_tfmini,
-            }],
+            executable='odometria',
+            name='odometria',
             output='screen',
+        ),
+        Node(
+            package='sensado',
+            executable='mapas_ieee1873',
+            name='mapas_ieee1873',
+            parameters=[{'meta_arboles': meta_arboles}],
+            output='screen',
+        ),
+
+        # ---------------------------------------------------------------------
+        # Control autónomo de rutina de árboles y cierre automático al terminar
+        # ---------------------------------------------------------------------
+        rutina_node,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=rutina_node,
+                on_exit=[EmitEvent(event=Shutdown(reason='Rutina de navegacion finalizada'))],
+            )
         ),
     ])
