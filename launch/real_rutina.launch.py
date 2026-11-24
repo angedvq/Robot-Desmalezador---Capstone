@@ -46,7 +46,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.80',
+            default_value='0.85',
             description='Distancia perpendicular objetivo a la hilera de árboles (m)',
         ),
         DeclareLaunchArgument(
@@ -71,12 +71,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'umbral_angulo_lento',
-            default_value='10.0',
+            default_value='18.0',
             description='Ángulo de corrección (grados) desde el cual el robot baja su velocidad a velocidad_correccion',
         ),
         DeclareLaunchArgument(
             'umbral_angulo_reanudar',
-            default_value='5.0',
+            default_value='6.0',
             description='Ángulo de corrección (grados) bajo el cual el robot vuelve a velocidad_avance',
         ),
         DeclareLaunchArgument(
@@ -91,7 +91,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'tiempo_barrido_brazo',
-            default_value='2.0',
+            default_value='3.0',
             description='Tiempo que el robot avanza con el brazo extendido realizando el barrido (s)',
         ),
         DeclareLaunchArgument(

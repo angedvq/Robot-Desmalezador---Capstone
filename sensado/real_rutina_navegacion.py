@@ -19,27 +19,26 @@ class RealRutinaNavegacion(Node):
         # Declaración de parámetros 
         # ---------------------------------------------------------------------
         # Parámetros geométricos y de avance
-        self.declare_parameter('distancia_meta', 0.80)        # Distancia a la hilera (m) para evitar roce del brazo con el tronco
-        self.declare_parameter('distancia_min_segura', 0.72)  # Distancia mínima lateral al tronco: si es menor, fuerza velocidad 0.05 m/s
+        self.declare_parameter('distancia_meta', 0.85)        # Distancia a la hilera (m)
         self.declare_parameter('distancia_frenado', 0.50)     # Umbral obstáculo TF-Mini (m)
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal habitual (m/s)
         self.declare_parameter('velocidad_correccion', 0.05)  # Velocidad reducida al corregir ángulos grandes (m/s)
 
         # Parámetros de corrección suave de rumbo PID (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 55.0)              # Ganancia proporcional (grados por metro de error)
-        self.declare_parameter('ki_rumbo', 22.0)              # Ganancia integral para vencer offset IMU y fricción
+        self.declare_parameter('kp_rumbo', 50.0)              # Ganancia proporcional (grados por metro de error)
+        self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
         self.declare_parameter('kd_rumbo', 15.0)              # Ganancia derivativa (grados por m/s de variación de error)
         self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
         self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
         self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
-        self.declare_parameter('umbral_angulo_lento', 10.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
-        self.declare_parameter('umbral_angulo_reanudar', 5.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
+        self.declare_parameter('umbral_angulo_lento', 18.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
+        self.declare_parameter('umbral_angulo_reanudar', 6.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 50.0)    
-        self.declare_parameter('tiempo_barrido_brazo', 2.0)       # Tiempo avanzando con el brazo extendido haciendo barrido (s)
+        self.declare_parameter('tiempo_barrido_brazo', 3.0)       # Tiempo avanzando con el brazo extendido haciendo barrido (s)
         self.declare_parameter('tiempo_delay_brazo', 1.5)         # Parámetro legado (no usado en modo barrido)
         self.declare_parameter('tiempo_brazo_extendido', 2.0)     # Respaldo / alias para duración con brazo extendido (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)        # Ceguera temporal para avanzar a sgte tronco (s)
@@ -52,7 +51,6 @@ class RealRutinaNavegacion(Node):
 
         # Lectura de parámetros
         self.distancia_meta = float(self.get_parameter('distancia_meta').value)
-        self.distancia_min_segura = float(self.get_parameter('distancia_min_segura').value)
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
         self.velocidad_correccion = float(self.get_parameter('velocidad_correccion').value)
@@ -322,7 +320,7 @@ class RealRutinaNavegacion(Node):
                 )
             self.error_previo = error
 
-            if abs(error) < 0.02:  # Dentro de +-2 cm de distancia_meta (0.80 m): mantener rumbo base actual
+            if abs(error) < 0.03:  # Dentro de +-3 cm de distancia_meta (0.85 m): mantener rumbo base actual
                 rumbo_objetivo = self.rumbo_integral
                 angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
             else:
@@ -333,10 +331,9 @@ class RealRutinaNavegacion(Node):
                     min(0.6 * self.max_grados_rumbo, self.rumbo_integral),
                 )
 
-                # 2. Término Proporcional (si está más cerca del árbol que distancia_meta, refuerza 1.25x para alejarse rápido)
-                ganancia_p = self.kp_rumbo * (1.25 if error < 0.0 else 1.0)
-                termino_p = error * ganancia_p
-                if abs(error) >= 0.03 and abs(termino_p) < self.min_grados_rumbo:
+                # 2. Término Proporcional con ángulo mínimo efectivo para mover las 4 ruedas
+                termino_p = error * self.kp_rumbo
+                if abs(error) >= 0.04 and abs(termino_p) < self.min_grados_rumbo:
                     termino_p = math.copysign(self.min_grados_rumbo, error)
 
                 # 3. Término Derivativo (acotado a +-12° para amortiguar sin amplificar ruido del LiDAR)
@@ -365,14 +362,8 @@ class RealRutinaNavegacion(Node):
             angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
 
         # ---------------------------------------------------------------------
-        # Lógica de separación de casos de velocidad según ángulo y distancia mínima al árbol
+        # Lógica de separación de casos de velocidad según ángulo de corrección
         # ---------------------------------------------------------------------
-        demasiado_cerca_del_arbol = (
-            tronco_guia_vigente
-            and self.distancia_tronco_actual is not None
-            and self.distancia_tronco_actual < self.distancia_min_segura
-        )
-
         if not permitir_correccion_lateral or not tronco_guia_vigente:
             if self.en_correccion_lenta:
                 self.en_correccion_lenta = False
@@ -381,29 +372,19 @@ class RealRutinaNavegacion(Node):
                     f"Restaurando velocidad habitual ({self.velocidad_avance:.2f} m/s)"
                 )
         else:
-            if not self.en_correccion_lenta and (
-                angulo_correccion >= self.umbral_angulo_lento or demasiado_cerca_del_arbol
-            ):
+            if not self.en_correccion_lenta and angulo_correccion >= self.umbral_angulo_lento:
                 self.en_correccion_lenta = True
-                motivo_lento = (
-                    f"Distancia lateral {self.distancia_tronco_actual:.2f}m < {self.distancia_min_segura:.2f}m"
-                    if demasiado_cerca_del_arbol
-                    else f"Ángulo a corregir {angulo_correccion:.1f}° >= {self.umbral_angulo_lento:.1f}°"
-                )
                 self.get_logger().info(
-                    f"[VELOCIDAD] {motivo_lento} -> Reduciendo velocidad a "
-                    f"{self.velocidad_correccion:.2f} m/s para asegurar separación del brazo"
+                    f"[VELOCIDAD] Ángulo a corregir grande ({angulo_correccion:.1f}° >= "
+                    f"{self.umbral_angulo_lento:.1f}°) -> Reduciendo velocidad a "
+                    f"{self.velocidad_correccion:.2f} m/s para completar giro"
                 )
-            elif (
-                self.en_correccion_lenta
-                and angulo_correccion <= self.umbral_angulo_reanudar
-                and not demasiado_cerca_del_arbol
-            ):
+            elif self.en_correccion_lenta and angulo_correccion <= self.umbral_angulo_reanudar:
                 self.en_correccion_lenta = False
                 self.get_logger().info(
-                    f"[VELOCIDAD] Separación y ángulo corregidos ({angulo_correccion:.1f}° <= "
-                    f"{self.umbral_angulo_reanudar:.1f}°, dist={self.distancia_tronco_actual:.2f}m) -> "
-                    f"Restaurando velocidad habitual ({self.velocidad_avance:.2f} m/s)"
+                    f"[VELOCIDAD] Ángulo corregido ({angulo_correccion:.1f}° <= "
+                    f"{self.umbral_angulo_reanudar:.1f}°) -> Restaurando velocidad habitual "
+                    f"({self.velocidad_avance:.2f} m/s)"
                 )
 
         # Limitador de pendiente (slew-rate) para que todo giro sea suave
