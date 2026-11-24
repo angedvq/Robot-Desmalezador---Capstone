@@ -1,6 +1,9 @@
+
 #!/usr/bin/env python3
 import os
 import math
+import json
+import time
 import rclpy
 import xml.etree.ElementTree as ET
 
@@ -13,14 +16,16 @@ from tf2_ros import Buffer, TransformListener, TransformException
 
 def _detectar_carpeta_mapeo_fuente() -> str:
     """
-    Devuelve la ruta de la carpeta `sensado/mapeo` en el código fuente si existe,
-    o el directorio del archivo actual como respaldo.
+    Devuelve la ruta de la carpeta sensado/mapeo en el código
+    fuente si existe, o el directorio del archivo actual.
     """
     dir_actual = os.path.dirname(os.path.abspath(__file__))
-    # Si se ejecuta desde install/, buscar la carpeta src/sensado/sensado/mapeo del workspace
+
     candidato_ws = os.path.expanduser('~/sensado/mapeo')
+
     if os.path.isdir(candidato_ws):
         return candidato_ws
+
     return dir_actual
 
 
@@ -35,14 +40,23 @@ class GeneradorMapa(Node):
         self.declare_parameter('distancia_minima', 0.45)
         self.declare_parameter(
             'ruta_xml',
-            os.path.join(_detectar_carpeta_mapeo_fuente(), 'mapa_arboles.xml'),
+            os.path.join(
+                _detectar_carpeta_mapeo_fuente(),
+                'mapa_arboles.xml'
+            ),
         )
 
         self.marco_mapa = 'odom'
-        self.distancia_minima = float(self.get_parameter('distancia_minima').value)
-        self.meta_arboles = int(self.get_parameter('meta_arboles').value)
+        self.distancia_minima = float(
+            self.get_parameter('distancia_minima').value
+        )
+        self.meta_arboles = int(
+            self.get_parameter('meta_arboles').value
+        )
         self.ruta_xml = os.path.abspath(
-            os.path.expanduser(str(self.get_parameter('ruta_xml').value))
+            os.path.expanduser(
+                str(self.get_parameter('ruta_xml').value)
+            )
         )
 
         self.arboles = []
@@ -66,13 +80,28 @@ class GeneradorMapa(Node):
             10
         )
 
+        # ============================================================
+        # 4. CONFIGURACIÓN DEL REGISTRO DE TRAYECTORIA
+        # ============================================================
+        self.t_inicio = time.monotonic()
+        self.trayectoria = []
+
+        self.ruta_json = os.path.join(
+            os.path.dirname(self.ruta_xml),
+            'mapa_complementario.json'
+        )
+
+        # Registrar posición cada 0.5 segundos
+        self.create_timer(0.5, self.registrar_trayectoria)
+
         self.get_logger().info(
-            f'Generador de mapa IEEE 1873 iniciado (meta: {self.meta_arboles} árboles). '
+            f'Generador de mapa IEEE 1873 iniciado '
+            f'(meta: {self.meta_arboles} árboles). '
             f'Archivo destino: {self.ruta_xml}'
         )
 
     # ================================================================
-    # 4. TRANSFORMAR Y REGISTRAR LOS ÁRBOLES
+    # 5. TRANSFORMAR Y REGISTRAR LOS ÁRBOLES
     # ================================================================
     def tree_callback(self, msg: PoseArray):
 
@@ -82,15 +111,15 @@ class GeneradorMapa(Node):
         if len(self.arboles) >= self.meta_arboles:
             return
 
-        # Obtener la última transformación disponible base_footprint -> odom.
-        # Usamos Time() (última disponible en el buffer) para evitar fallos de extrapolación
-        # por diferencias de milisegundos entre los relojes del LiDAR y de odometría.
+        # Obtener la última transformación disponible
+        # desde base_footprint hacia odom.
         try:
             transformacion = self.tf_buffer.lookup_transform(
                 self.marco_mapa,
                 'base_footprint',
                 Time()
             )
+
         except TransformException as error:
             self.get_logger().warn(
                 f'Transformación TF no disponible: {error}',
@@ -100,21 +129,26 @@ class GeneradorMapa(Node):
 
         tx = float(transformacion.transform.translation.x)
         ty = float(transformacion.transform.translation.y)
+
         q = transformacion.transform.rotation
-        # Ángulo yaw de la rotación 2D odom -> base_footprint
+
+        # Obtener yaw a partir del cuaternión
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+
         yaw = math.atan2(siny_cosp, cosy_cosp)
+
         cos_yaw = math.cos(yaw)
         sin_yaw = math.sin(yaw)
 
         for pose in msg.poses:
-            # En real_cf_deteccion_troncos, pose.position.(x, y) ya viene expresado
-            # en el marco del robot (base_footprint: +X adelante, +Y izquierda).
+
+            # Las coordenadas publicadas por el detector real
+            # ya están expresadas en los ejes del robot.
             px = float(pose.position.x)
             py = float(pose.position.y)
 
-            # Transformación rígida 2D desde base_footprint hacia odom
+            # Transformación rígida 2D hacia el marco odom
             x = tx + (px * cos_yaw - py * sin_yaw)
             y = ty + (px * sin_yaw + py * cos_yaw)
 
@@ -135,7 +169,8 @@ class GeneradorMapa(Node):
             self.arboles.append((x, y))
 
             self.get_logger().info(
-                f'Árbol {len(self.arboles)}/{self.meta_arboles} registrado en mapa: '
+                f'Árbol {len(self.arboles)}/{self.meta_arboles} '
+                f'registrado en mapa: '
                 f'x={x:.3f} m, y={y:.3f} m'
             )
 
@@ -143,12 +178,69 @@ class GeneradorMapa(Node):
 
             if len(self.arboles) >= self.meta_arboles:
                 self.get_logger().info(
-                    f'{len(self.arboles)}/{self.meta_arboles} árboles registrados. Mapa completado.'
+                    f'{len(self.arboles)}/{self.meta_arboles} '
+                    f'árboles registrados. Mapa completado.'
                 )
                 break
 
     # ================================================================
-    # 5. GENERAR ARCHIVO XML DEL MAPA GEOMÉTRICO
+    # 6. REGISTRAR LA TRAYECTORIA DEL ROBOT
+    # ================================================================
+    def registrar_trayectoria(self):
+
+        try:
+            transformacion = self.tf_buffer.lookup_transform(
+                self.marco_mapa,
+                'base_footprint',
+                Time()
+            )
+
+        except TransformException:
+            return
+
+        # Obtener posición estimada del robot
+        x = float(transformacion.transform.translation.x)
+        y = float(transformacion.transform.translation.y)
+
+        # Tiempo transcurrido desde el inicio del nodo
+        t = time.monotonic() - self.t_inicio
+
+        # Registrar posición y tiempo
+        self.trayectoria.append({
+            't': round(t, 3),
+            'x': round(x, 4),
+            'y': round(y, 4)
+        })
+
+        self.guardar_trayectoria()
+
+    # ================================================================
+    # 7. GUARDAR TRAYECTORIA EN ARCHIVO JSON
+    # ================================================================
+    def guardar_trayectoria(self):
+
+        datos = {
+            'marco': self.marco_mapa,
+            'trayectoria': self.trayectoria
+        }
+
+        # Asegurar que exista la carpeta destino
+        os.makedirs(
+            os.path.dirname(self.ruta_json),
+            exist_ok=True
+        )
+
+        # Escribir primero en un archivo temporal
+        temporal = self.ruta_json + '.tmp'
+
+        with open(temporal, 'w', encoding='utf-8') as archivo:
+            json.dump(datos, archivo, indent=4)
+
+        # Reemplazar el JSON anterior
+        os.replace(temporal, self.ruta_json)
+
+    # ================================================================
+    # 8. GENERAR ARCHIVO XML DEL MAPA GEOMÉTRICO
     # ================================================================
     def guardar_xml(self):
 
@@ -192,11 +284,13 @@ class GeneradorMapa(Node):
                 'y': f'{y:.4f}'
             })
 
-        # Asegurar que la carpeta destino exista y escribir archivo XML
+        # Asegurar que exista la carpeta destino
         dir_destino = os.path.dirname(self.ruta_xml)
+
         if dir_destino:
             os.makedirs(dir_destino, exist_ok=True)
 
+        # Escribir archivo XML
         arbol_xml = ET.ElementTree(raiz)
         ET.indent(arbol_xml, space='    ')
 
@@ -211,19 +305,23 @@ class GeneradorMapa(Node):
         )
 
 
-# ================================================================
-# 6. EJECUCIÓN DEL NODO ROS 2
-# ================================================================
+# ====================================================================
+# 9. EJECUCIÓN DEL NODO ROS 2
+# ====================================================================
 def main(args=None):
     rclpy.init(args=args)
     node = GeneradorMapa()
 
     try:
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
+
     finally:
+        node.guardar_trayectoria()
         node.destroy_node()
+
         if rclpy.ok():
             rclpy.shutdown()
 
