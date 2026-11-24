@@ -145,9 +145,9 @@ class RealRutinaNavegacion(Node):
 
         self.get_logger().info(
             f"real_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
-            f"Triangulación brazo-LiDAR: {self.distancia_lidar_brazo * 100.0:.0f}cm (timeout respaldo: {self.tiempo_delay_brazo:.1f}s) | "
+            f"Triangulación brazo-LiDAR: {self.distancia_lidar_brazo * 100.0:.0f}cm  | "
             f"Espera con brazo extendido: {self.tiempo_brazo_extendido:.1f}s | "
-            f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm (confirmación por STM32: 4=ext, 3=ret)"
+            f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm"
         )
 
     # =========================================================================
