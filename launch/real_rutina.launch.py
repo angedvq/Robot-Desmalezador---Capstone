@@ -46,7 +46,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.85',
+            default_value='0.95',
             description='Distancia perpendicular objetivo a la hilera de árboles (m)',
         ),
         DeclareLaunchArgument(
@@ -66,7 +66,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'kd_rumbo',
-            default_value='15.0',
+            default_value='0.0',
             description='Ganancia derivativa del control PID de rumbo (grados por m/s de variación de error)',
         ),
         DeclareLaunchArgument(
@@ -91,7 +91,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'tiempo_barrido_brazo',
-            default_value='3.0',
+            default_value='2.5',
             description='Tiempo que el robot avanza con el brazo extendido realizando el barrido (s)',
         ),
         DeclareLaunchArgument(
