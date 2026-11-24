@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540" viewBox="0 0 900 540">
+<rect width="100%" height="100%" fill="#f8fafc"/>
+<text x="45" y="42" font-family="Arial" font-size="25" font-weight="bold" fill="#132b42">Mapa de árboles</text>
+<text x="45" y="66" font-family="Arial" font-size="14" fill="#52657a">Coordenadas detectadas por LiDAR · Marco odom · Unidades: m</text>
+<line x1="-50.15" y1="100" x2="-50.15" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="-50.15" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">0</text>
+<line x1="85.68" y1="100" x2="85.68" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="85.68" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">1</text>
+<line x1="221.51" y1="100" x2="221.51" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="221.51" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">2</text>
+<line x1="357.34" y1="100" x2="357.34" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="357.34" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">3</text>
+<line x1="493.17" y1="100" x2="493.17" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="493.17" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">4</text>
+<line x1="629.00" y1="100" x2="629.00" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="629.00" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">5</text>
+<line x1="764.83" y1="100" x2="764.83" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="764.83" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">6</text>
+<line x1="900.66" y1="100" x2="900.66" y2="478" stroke="#dbe3ec" stroke-width="1"/>
+<text x="900.66" y="497" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">7</text>
+<line x1="40" y1="369.22" x2="855" y2="369.22" stroke="#dbe3ec" stroke-width="1"/>
+<text x="22" y="373.22" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">0</text>
+<line x1="40" y1="233.39" x2="855" y2="233.39" stroke="#dbe3ec" stroke-width="1"/>
+<text x="22" y="237.39" text-anchor="middle" font-family="Arial" font-size="12" fill="#597084">1</text>
+<circle cx="215.83" cy="254.19" r="13" fill="#16835b" stroke="#075238" stroke-width="3"/>
+<text x="215.83" y="230.19" font-family="Arial" text-anchor="middle" font-size="14" font-weight="bold" fill="#173b30">Árbol 1</text>
+<text x="215.83" y="288.19" font-family="Arial" text-anchor="middle" font-size="12" fill="#34485a">(1.958, 0.847)</text>
+<circle cx="455.76" cy="285.81" r="13" fill="#16835b" stroke="#075238" stroke-width="3"/>
+<text x="455.76" y="261.81" font-family="Arial" text-anchor="middle" font-size="14" font-weight="bold" fill="#173b30">Árbol 2</text>
+<text x="455.76" y="319.81" font-family="Arial" text-anchor="middle" font-size="12" fill="#34485a">(3.725, 0.614)</text>
+<circle cx="684.17" cy="256.54" r="13" fill="#16835b" stroke="#075238" stroke-width="3"/>
+<text x="684.17" y="232.54" font-family="Arial" text-anchor="middle" font-size="14" font-weight="bold" fill="#173b30">Árbol 3</text>
+<text x="684.17" y="290.54" font-family="Arial" text-anchor="middle" font-size="12" fill="#34485a">(5.406, 0.830)</text>
+<text x="450" y="528" text-anchor="middle" font-family="Arial" font-size="14" fill="#52657a">Eje X (m)</text>
+<text x="882" y="290" text-anchor="middle" font-family="Arial" font-size="14" fill="#52657a" transform="rotate(-90, 882, 290)">Eje Y (m)</text>
+</svg>

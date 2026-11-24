@@ -82,6 +82,7 @@ class RealSTM32Bridge(Node):
         # Suscriptores 
         self.create_subscription(Twist, '/cmd_vel', self.recibir_velocidad, 10)
         self.create_subscription(Bool, '/navegacion/stop', self.recibir_stop, 10)
+        self.create_subscription(Bool, '/navegacion/stop_mov', self.recibir_stop_mov, 10)
         self.create_subscription(Float32, '/navegacion/corregir_grados', self.recibir_correccion, 10)
         self.create_subscription(Bool, '/bomba', self.recibir_bomba, 10)
         self.create_subscription(Float32, '/brazo_mm', self.recibir_brazo, 10)
@@ -105,11 +106,31 @@ class RealSTM32Bridge(Node):
         self.velocidad = nueva_vel
         self.ultimo_cmd = time.monotonic()
 
+        # Si recibe velocidad 0.0 mientras estaba en movimiento, encolar STOP_MOV inmediatamente
+        if abs(nueva_vel) < 1e-4 and self.en_movimiento:
+            self._detener_movimiento_ruedas()
         # Si ya está en movimiento y la rutina cambia de régimen de velocidad
         # (ej. 0.20 m/s <-> 0.05 m/s durante corrección de ángulo grande),
         # encolar SET_VEL de inmediato para no esperar a que se vacíe la cola de SET_HEADING.
-        if self.en_movimiento and not self.stop_solicitado and abs(nueva_vel) >= 1e-4 and cambio_vel:
+        elif self.en_movimiento and not self.stop_solicitado and abs(nueva_vel) >= 1e-4 and cambio_vel:
             self.pendientes.appendleft((SET_VEL, self.velocidad))
+
+    def _detener_movimiento_ruedas(self):
+        """Encola STOP_MOV + STOP_TRACKING + RESET_TRACKING al frente para frenar las ruedas de inmediato."""
+        self.velocidad = 0.0
+        self.en_movimiento = False
+        self.ultimo_rumbo = 0.0
+        ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
+        self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
+        self.pendientes.appendleft((RESET_TRACKING, 0.0))
+        self.pendientes.appendleft((STOP_TRACKING, 0.0))
+        self.pendientes.appendleft((STOP_MOV, 0.0))
+
+    def recibir_stop_mov(self, msg: Bool):
+        """Recibe orden explícita /navegacion/stop_mov para enviar STOP_MOV (Orden 11) a la STM32."""
+        self.ultimo_cmd = time.monotonic()
+        if bool(msg.data):
+            self._detener_movimiento_ruedas()
 
     def recibir_stop(self, msg: Bool):
         """Recibe bandera de parada total /navegacion/stop"""
@@ -229,15 +250,7 @@ class RealSTM32Bridge(Node):
         # ---------------------------------------------------------------------
         elif abs(self.velocidad) < 1e-4:
             if self.en_movimiento:
-                self.en_movimiento = False
-                self.ultimo_rumbo = 0.0
-
-                # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
-                ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
-                self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-                self.pendientes.appendleft((RESET_TRACKING, 0.0))
-                self.pendientes.appendleft((STOP_TRACKING, 0.0))
-                self.pendientes.appendleft((STOP_MOV, 0.0))
+                self._detener_movimiento_ruedas()
 
             # Si hay órdenes en cola las enviamos; si la cola está vacía, mantenemos STOP_Mov
             orden, valor = (self.pendientes.popleft() if self.pendientes else (STOP_MOV, 0.0))

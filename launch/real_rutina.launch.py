@@ -19,7 +19,7 @@ def generate_launch_description():
     umbral_angulo_reanudar = LaunchConfiguration('umbral_angulo_reanudar')
     meta_arboles = LaunchConfiguration('meta_arboles')
     timeout_sin_arbol = LaunchConfiguration('timeout_sin_arbol')
-    distancia_lidar_brazo = LaunchConfiguration('distancia_lidar_brazo')
+    tiempo_barrido_brazo = LaunchConfiguration('tiempo_barrido_brazo')
     tiempo_delay_brazo = LaunchConfiguration('tiempo_delay_brazo')
     tiempo_brazo_extendido = LaunchConfiguration('tiempo_brazo_extendido')
     desplazamiento_brazo_mm = LaunchConfiguration('desplazamiento_brazo_mm')
@@ -46,7 +46,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.70',
+            default_value='0.80',
             description='Distancia perpendicular objetivo a la hilera de árboles (m)',
         ),
         DeclareLaunchArgument(
@@ -71,12 +71,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'umbral_angulo_lento',
-            default_value='12.0',
+            default_value='10.0',
             description='Ángulo de corrección (grados) desde el cual el robot baja su velocidad a velocidad_correccion',
         ),
         DeclareLaunchArgument(
             'umbral_angulo_reanudar',
-            default_value='6.0',
+            default_value='5.0',
             description='Ángulo de corrección (grados) bajo el cual el robot vuelve a velocidad_avance',
         ),
         DeclareLaunchArgument(
@@ -90,14 +90,14 @@ def generate_launch_description():
             description='Tiempo máximo sin detectar un árbol antes de detenerse (s)',
         ),
         DeclareLaunchArgument(
-            'distancia_lidar_brazo',
-            default_value='0.28',
-            description='Separación longitudinal entre el LiDAR y el eje del brazo trasero (m)',
+            'tiempo_barrido_brazo',
+            default_value='2.0',
+            description='Tiempo que el robot avanza con el brazo extendido realizando el barrido (s)',
         ),
         DeclareLaunchArgument(
             'tiempo_delay_brazo',
-            default_value='2.2',
-            description='Timeout máximo de respaldo para alinear el brazo trasero si se pierde lectura LiDAR (s)',
+            default_value='1.5',
+            description='Parámetro legado de delay (no usado en modo barrido)',
         ),
         DeclareLaunchArgument(
             'tiempo_brazo_extendido',
@@ -192,7 +192,7 @@ def generate_launch_description():
                 'umbral_angulo_reanudar': umbral_angulo_reanudar,
                 'meta_arboles': meta_arboles,
                 'timeout_sin_arbol': timeout_sin_arbol,
-                'distancia_lidar_brazo': distancia_lidar_brazo,
+                'tiempo_barrido_brazo': tiempo_barrido_brazo,
                 'tiempo_delay_brazo': tiempo_delay_brazo,
                 'tiempo_brazo_extendido': tiempo_brazo_extendido,
                 'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
