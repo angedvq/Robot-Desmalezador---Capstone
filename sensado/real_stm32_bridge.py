@@ -286,7 +286,7 @@ class RealSTM32Bridge(Node):
             self.bomba_encendida
             and self.brazo_extendido_confirmado
             and not self.stop_solicitado
-            and (now_mono - self.ultimo_refresco_bomba_ts) >= 0.25
+            and (now_mono - self.ultimo_refresco_bomba_ts) >= 0.50
         ):
             self.ultimo_refresco_bomba_ts = now_mono
             if not any(cmd[0] == START_BOMBA for cmd in self.pendientes):

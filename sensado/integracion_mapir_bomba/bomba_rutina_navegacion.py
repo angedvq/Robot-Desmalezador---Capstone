@@ -748,11 +748,11 @@ class BombaRutinaNavegacion(Node):
                     self.tiempo_inicio_estado = now
                     return
 
-                # Activar bomba de inmediato al recibir código 4 y aplicar micro-avance de +8 mm
-                # tras el retroceso de -10 mm de INTR_END() para asegurar screw_mm > 390 mm en bomba.c
-                if not self.bomba_activa:
-                    self.comandar_bomba(True)
-
+                # Secuencia escalonada para evitar picos simultáneos de corriente (Caída de voltaje):
+                # 1) 0.00..0.45 s: esperar a que termine MOVE_Stepper(-10 mm) de INTR_END() con bomba APAGADA.
+                # 2) 0.45..0.85 s: enviar micro-avance de +8 mm (recupera screw_mm > 390 mm) con bomba APAGADA.
+                # 3) >= 0.85 s: cuando el stepper ya entró en DRV8825_Sleep() (0 A) y las ruedas están
+                #    detenidas (0 A), recién activar la bomba (100% PWM durante 200 ms WAKE).
                 t_desde_end = (
                     (now - self.ts_codigo_brazo_extendido)
                     if self.ts_codigo_brazo_extendido is not None
@@ -763,13 +763,12 @@ class BombaRutinaNavegacion(Node):
                     msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm sin tocar switch END
                     self.brazo_pub.publish(msg_micro)
                     self.micro_avance_end_enviado = True
-                    self.comandar_bomba(True)
-                elif self.micro_avance_end_enviado and t_desde_end >= 0.80:
+                elif self.micro_avance_end_enviado and t_desde_end >= 0.85:
                     self.comandar_bomba(True)
                     self.estado_actual = 'CAL_BOMBA_ACTIVA'
                     self.tiempo_inicio_estado = now
                     self.get_logger().info(
-                        f"[CALIBRACIÓN BOMBA] Brazo extendido confirmado (código 4). "
+                        f"[CALIBRACIÓN BOMBA] Brazo extendido y stepper en reposo (código 4). "
                         f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
                     )
 
@@ -790,7 +789,7 @@ class BombaRutinaNavegacion(Node):
         elif self.estado_actual == 'CAL_RETRAYENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
-            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.15:
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.25:
                 self.comandar_brazo('RETRAER')
                 self.orden_retraer_enviada = True
 
@@ -929,8 +928,12 @@ class BombaRutinaNavegacion(Node):
             # y luego iniciamos BARRIENDO_BRAZO.
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
                 if self.usar_bomba:
-                    if not self.bomba_activa:
-                        self.comandar_bomba(True)
+                    # Secuencia escalonada anti-caída de voltaje:
+                    # 1) 0.00..0.45 s: esperar fin de MOVE_Stepper(-10 mm) de INTR_END() (bomba apagada).
+                    # 2) 0.45..0.85 s: micro-avance +8 mm del stepper (bomba apagada).
+                    # 3) 0.85..1.20 s: stepper ya en DRV8825_Sleep() (0 A) y ruedas detenidas (0 A) ->
+                    #    encender bomba sola para que supere su pulso WAKE (100% PWM por 200 ms).
+                    # 4) >= 1.20 s: con la bomba ya en régimen RUN (60% PWM), iniciar avance de barrido.
                     t_desde_end = (
                         (now - self.ts_codigo_brazo_extendido)
                         if self.ts_codigo_brazo_extendido is not None
@@ -941,14 +944,14 @@ class BombaRutinaNavegacion(Node):
                         msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm en bomba.c
                         self.brazo_pub.publish(msg_micro)
                         self.micro_avance_end_enviado = True
+                    elif self.micro_avance_end_enviado and not self.bomba_activa and t_desde_end >= 0.85:
                         self.comandar_bomba(True)
-                    elif self.micro_avance_end_enviado and t_desde_end >= 0.85:
-                        self.comandar_bomba(True)
+                    elif self.micro_avance_end_enviado and self.bomba_activa and t_desde_end >= 1.20:
                         self.estado_actual = 'BARRIENDO_BRAZO'
                         self.tiempo_inicio_estado = now
                         self.get_logger().info(
-                            f"STM32 confirmó brazo extendido (código 4). "
-                            f"Bomba ACTIVADA e iniciando barrido durante {self.tiempo_barrido_brazo:.1f}s..."
+                            f"STM32 confirmó brazo extendido (código 4) y bomba en régimen. "
+                            f"Iniciando barrido durante {self.tiempo_barrido_brazo:.1f}s..."
                         )
                 else:
                     self.estado_actual = 'BARRIENDO_BRAZO'
@@ -985,7 +988,7 @@ class BombaRutinaNavegacion(Node):
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
-            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.10:
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.25:
                 self.comandar_brazo('RETRAER')
                 self.orden_retraer_enviada = True
 
