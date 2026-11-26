@@ -174,6 +174,8 @@ class BombaRutinaNavegacion(Node):
         self.ts_orden_extender = None
         self.rehoming_en_calibracion = False
         self.micro_avance_end_enviado = False
+        self.stepper_sleep_end_enviado = False
+        self.stepper_sleep_home_enviado = False
 
         # Métricas acumuladas para el reporte final de la rutina
         self.inicio_rutina_ts = None
@@ -236,12 +238,14 @@ class BombaRutinaNavegacion(Node):
             self.stm32_brazo_extendido = True
             self.ts_codigo_brazo_extendido = time.monotonic()
             self.micro_avance_end_enviado = False
+            self.stepper_sleep_end_enviado = False
             self.get_logger().info(
                 "[STM32 -> Navegación] Código 4 recibido: Brazo totalmente EXTENDIDO."
             )
         elif codigo == STM32_BRAZO_RETRAIDO:
             self.stm32_brazo_retraido = True
             self.ts_codigo_brazo_retraido = time.monotonic()
+            self.stepper_sleep_home_enviado = False
             self.brazo_extendido = False
             self.brazo_retraido_confirmado = True
             self.get_logger().info(
@@ -418,6 +422,18 @@ class BombaRutinaNavegacion(Node):
         """Restaura los tiempos transcurridos al reanudarse la operación."""
         self.tiempo_inicio_estado = now - self.tiempo_transcurrido_guardado
         self.tiempo_ultimo_arbol = now - self.tiempo_sin_ver_arbol_guardado
+
+    def _velocidad_con_rampa_suave(self, vel_objetivo: float, tiempo_en_estado: float) -> float:
+        """
+        Aplica una rampa suave de aceleración (0.80 s desde velocidad_correccion hasta vel_objetivo)
+        al iniciar cualquier estado de movimiento desde reposo (AVANZANDO, BARRIENDO_BRAZO, ENFRIAMIENTO).
+        Esto evita el pico de corriente de rotor bloqueado de los 4 motores DC que dispara
+        sub_voltaje = 1 (Caída de voltaje) en la STM32.
+        """
+        if vel_objetivo <= self.velocidad_correccion or tiempo_en_estado >= 0.80:
+            return vel_objetivo
+        progreso = max(0.0, min(1.0, tiempo_en_estado / 0.80))
+        return self.velocidad_correccion + progreso * (vel_objetivo - self.velocidad_correccion)
 
     def _finalizar_rutina_con_reporte(self, motivo: str):
         """
@@ -748,27 +764,33 @@ class BombaRutinaNavegacion(Node):
                     self.tiempo_inicio_estado = now
                     return
 
-                # Secuencia escalonada para evitar picos simultáneos de corriente (Caída de voltaje):
+                # Secuencia escalonada para evitar picos y caída acumulada de voltaje:
                 # 1) 0.00..0.45 s: esperar a que termine MOVE_Stepper(-10 mm) de INTR_END() con bomba APAGADA.
                 # 2) 0.45..0.85 s: enviar micro-avance de +8 mm (recupera screw_mm > 390 mm) con bomba APAGADA.
-                # 3) >= 0.85 s: cuando el stepper ya entró en DRV8825_Sleep() (0 A) y las ruedas están
-                #    detenidas (0 A), recién activar la bomba (100% PWM durante 200 ms WAKE).
+                # 3) 0.85..2.00 s: enviar STOP_Stepper (0.0 mm -> DRV8825_Sleep(), 0 A) y dejar descansar
+                #    la batería ~1.15 s sin ninguna carga tras los 10 s de extensión del brazo.
+                # 4) >= 2.00 s: activar la bomba sola (con stepper en SLEEP y ruedas detenidas).
                 t_desde_end = (
                     (now - self.ts_codigo_brazo_extendido)
                     if self.ts_codigo_brazo_extendido is not None
-                    else 1.0
+                    else 2.5
                 )
                 if not self.micro_avance_end_enviado and t_desde_end >= 0.45:
                     msg_micro = Float32()
                     msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm sin tocar switch END
                     self.brazo_pub.publish(msg_micro)
                     self.micro_avance_end_enviado = True
-                elif self.micro_avance_end_enviado and t_desde_end >= 0.85:
+                elif self.micro_avance_end_enviado and not self.stepper_sleep_end_enviado and t_desde_end >= 0.85:
+                    msg_sleep = Float32()
+                    msg_sleep.data = 0.0  # STOP_Stepper -> fuerza DRV8825_Sleep() (0.0 A en stepper)
+                    self.brazo_pub.publish(msg_sleep)
+                    self.stepper_sleep_end_enviado = True
+                elif self.stepper_sleep_end_enviado and t_desde_end >= 2.00:
                     self.comandar_bomba(True)
                     self.estado_actual = 'CAL_BOMBA_ACTIVA'
                     self.tiempo_inicio_estado = now
                     self.get_logger().info(
-                        f"[CALIBRACIÓN BOMBA] Brazo extendido y stepper en reposo (código 4). "
+                        f"[CALIBRACIÓN BOMBA] Brazo extendido y stepper en SLEEP (código 4). "
                         f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
                     )
 
@@ -783,32 +805,44 @@ class BombaRutinaNavegacion(Node):
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
                     f"[CALIBRACIÓN BOMBA] Cebado de {self.tiempo_calibracion_bomba:.1f}s completado. "
-                    f"Bomba apagada. Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
+                    f"Bomba apagada. Esperando 1.50s de recuperación de batería antes de retraer brazo..."
                 )
 
         elif self.estado_actual == 'CAL_RETRAYENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
-            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.25:
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 1.50:
                 self.comandar_brazo('RETRAER')
                 self.orden_retraer_enviada = True
 
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
-                # Esperar 0.50 s tras código 3 para que INTR_HOME() termine MOVE_Stepper(+10 mm)
+                # Al recibir código 3 (INTR_HOME), el stepper se mueve +10 mm (MOVE_Stepper(BACK_MARGIN)).
+                # 1) A los 0.85 s enviamos STOP_Stepper (0.0 mm -> DRV8825_Sleep()) para asegurar 0 A en stepper.
+                # 2) Esperamos hasta 1.50 s con TODO en reposo (0 A) para que la tensión de la batería
+                #    se recupere por completo antes de arrancar los 4 motores de las ruedas en AVANZANDO.
                 t_desde_home = (
                     (now - self.ts_codigo_brazo_retraido)
                     if self.ts_codigo_brazo_retraido is not None
-                    else 1.0
+                    else 2.0
                 )
-                if t_desde_home >= 0.50:
+                if not self.stepper_sleep_home_enviado and t_desde_home >= 0.85:
+                    msg_sleep = Float32()
+                    msg_sleep.data = 0.0  # STOP_Stepper -> fuerza DRV8825_Sleep() (0 A)
+                    self.brazo_pub.publish(msg_sleep)
+                    self.stepper_sleep_home_enviado = True
+                elif self.stepper_sleep_home_enviado and t_desde_home >= 1.50:
                     self.brazo_retraido_confirmado = True
                     self.calibracion_bomba_completada = True
                     self.estado_actual = 'AVANZANDO'
                     self.tiempo_inicio_estado = now
                     self.tiempo_ultimo_arbol = now
+                    self.rumbo_integral = 0.0
+                    self.rumbo_suavizado = 0.0
+                    self.error_previo = None
+                    self.derivada_error_filtrada = 0.0
                     self.get_logger().info(
-                        "[CALIBRACIÓN BOMBA] Brazo retraído confirmado (código 3). "
-                        "Calibración de bomba finalizada. Iniciando rutina de búsqueda de árboles..."
+                        "[CALIBRACIÓN BOMBA] Brazo retraído y stepper en SLEEP (código 3). "
+                        "Calibración finalizada. Iniciando avance con rampa suave..."
                     )
 
         elif self.estado_actual == 'AVANZANDO':
@@ -818,10 +852,14 @@ class BombaRutinaNavegacion(Node):
                 self.cmd_pub.publish(msg_vel)
                 return
 
-            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=True)
-            msg_vel.linear.x = (
+            # Durante los primeros 0.60 s de arranque desde reposo, mantener rumbo 0° (recto)
+            # para no exigir giro diferencial (skid-steer) mientras los 4 motores vencen la inercia
+            permitir_giro = tiempo_transcurrido >= 0.60
+            self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=permitir_giro)
+            vel_meta = (
                 self.velocidad_correccion if self.en_correccion_lenta else self.velocidad_avance
             )
+            msg_vel.linear.x = self._velocidad_con_rampa_suave(vel_meta, tiempo_transcurrido)
 
             # Criterio de parada por timeout sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
@@ -931,22 +969,28 @@ class BombaRutinaNavegacion(Node):
                     # Secuencia escalonada anti-caída de voltaje:
                     # 1) 0.00..0.45 s: esperar fin de MOVE_Stepper(-10 mm) de INTR_END() (bomba apagada).
                     # 2) 0.45..0.85 s: micro-avance +8 mm del stepper (bomba apagada).
-                    # 3) 0.85..1.20 s: stepper ya en DRV8825_Sleep() (0 A) y ruedas detenidas (0 A) ->
-                    #    encender bomba sola para que supere su pulso WAKE (100% PWM por 200 ms).
-                    # 4) >= 1.20 s: con la bomba ya en régimen RUN (60% PWM), iniciar avance de barrido.
+                    # 3) 0.85..1.15 s: enviar STOP_Stepper (0.0 mm -> DRV8825_Sleep(), 0 A) y reposar 0.30 s.
+                    # 4) 1.15..1.65 s: encender bomba sola (ruedas detenidas, stepper en SLEEP) para que
+                    #    supere su pulso WAKE (100% PWM por 200 ms) y se estabilice al 60% PWM.
+                    # 5) >= 1.65 s: iniciar avance de barrido con rampa suave de velocidad.
                     t_desde_end = (
                         (now - self.ts_codigo_brazo_extendido)
                         if self.ts_codigo_brazo_extendido is not None
-                        else 1.0
+                        else 2.0
                     )
                     if not self.micro_avance_end_enviado and t_desde_end >= 0.45:
                         msg_micro = Float32()
                         msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm en bomba.c
                         self.brazo_pub.publish(msg_micro)
                         self.micro_avance_end_enviado = True
-                    elif self.micro_avance_end_enviado and not self.bomba_activa and t_desde_end >= 0.85:
+                    elif self.micro_avance_end_enviado and not self.stepper_sleep_end_enviado and t_desde_end >= 0.85:
+                        msg_sleep = Float32()
+                        msg_sleep.data = 0.0  # STOP_Stepper -> fuerza DRV8825_Sleep() (0 A)
+                        self.brazo_pub.publish(msg_sleep)
+                        self.stepper_sleep_end_enviado = True
+                    elif self.stepper_sleep_end_enviado and not self.bomba_activa and t_desde_end >= 1.15:
                         self.comandar_bomba(True)
-                    elif self.micro_avance_end_enviado and self.bomba_activa and t_desde_end >= 1.20:
+                    elif self.stepper_sleep_end_enviado and self.bomba_activa and t_desde_end >= 1.65:
                         self.estado_actual = 'BARRIENDO_BRAZO'
                         self.tiempo_inicio_estado = now
                         self.get_logger().info(
@@ -954,17 +998,30 @@ class BombaRutinaNavegacion(Node):
                             f"Iniciando barrido durante {self.tiempo_barrido_brazo:.1f}s..."
                         )
                 else:
-                    self.estado_actual = 'BARRIENDO_BRAZO'
-                    self.tiempo_inicio_estado = now
-                    self.get_logger().info(
-                        f"STM32 confirmó brazo extendido (código 4). "
-                        f"Iniciando (sin bomba) barrido durante {self.tiempo_barrido_brazo:.1f}s..."
+                    t_desde_end = (
+                        (now - self.ts_codigo_brazo_extendido)
+                        if self.ts_codigo_brazo_extendido is not None
+                        else 1.0
                     )
+                    if not self.stepper_sleep_end_enviado and t_desde_end >= 0.50:
+                        msg_sleep = Float32()
+                        msg_sleep.data = 0.0
+                        self.brazo_pub.publish(msg_sleep)
+                        self.stepper_sleep_end_enviado = True
+                    elif self.stepper_sleep_end_enviado and t_desde_end >= 0.80:
+                        self.estado_actual = 'BARRIENDO_BRAZO'
+                        self.tiempo_inicio_estado = now
+                        self.get_logger().info(
+                            f"STM32 confirmó brazo extendido (código 4). "
+                            f"Iniciando (sin bomba) barrido durante {self.tiempo_barrido_brazo:.1f}s..."
+                        )
 
         elif self.estado_actual == 'BARRIENDO_BRAZO':
             # Avanza en línea recta con el brazo extendido (y bomba activa si usar_bomba=True) durante `tiempo_barrido_brazo`
             if tiempo_transcurrido < self.tiempo_barrido_brazo:
-                msg_vel.linear.x = self.velocidad_avance
+                msg_vel.linear.x = self._velocidad_con_rampa_suave(
+                    self.velocidad_avance, tiempo_transcurrido
+                )
                 self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 msg_vel.linear.x = 0.0
@@ -988,16 +1045,27 @@ class BombaRutinaNavegacion(Node):
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
-            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.25:
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 1.00:
                 self.comandar_brazo('RETRAER')
                 self.orden_retraer_enviada = True
 
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
-                self.brazo_retraido_confirmado = True
-                if self._finalizar_o_continuar_siguiente_arbol(
-                    now, motivo_log="Barrido completado y brazo retraído (código 3 STM32)."
-                ):
-                    return
+                t_desde_home = (
+                    (now - self.ts_codigo_brazo_retraido)
+                    if self.ts_codigo_brazo_retraido is not None
+                    else 2.0
+                )
+                if not self.stepper_sleep_home_enviado and t_desde_home >= 0.85:
+                    msg_sleep = Float32()
+                    msg_sleep.data = 0.0  # STOP_Stepper -> fuerza DRV8825_Sleep() (0 A)
+                    self.brazo_pub.publish(msg_sleep)
+                    self.stepper_sleep_home_enviado = True
+                elif self.stepper_sleep_home_enviado and t_desde_home >= 1.40:
+                    self.brazo_retraido_confirmado = True
+                    if self._finalizar_o_continuar_siguiente_arbol(
+                        now, motivo_log="Barrido completado y brazo retraído (código 3 STM32)."
+                    ):
+                        return
 
         elif self.estado_actual == 'ENFRIAMIENTO':
             if not self.brazo_retraido_confirmado or self.brazo_extendido or self.bomba_activa:
@@ -1005,7 +1073,9 @@ class BombaRutinaNavegacion(Node):
                 self.cmd_pub.publish(msg_vel)
                 return
 
-            msg_vel.linear.x = self.velocidad_avance
+            msg_vel.linear.x = self._velocidad_con_rampa_suave(
+                self.velocidad_avance, tiempo_transcurrido
+            )
             self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
 
             if tiempo_transcurrido >= self.tiempo_enfriamiento:
