@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
@@ -22,6 +22,7 @@ def generate_launch_description():
     umbral_angulo_reanudar = LaunchConfiguration('umbral_angulo_reanudar')
     meta_arboles = LaunchConfiguration('meta_arboles')
     timeout_sin_arbol = LaunchConfiguration('timeout_sin_arbol')
+    tiempo_calibracion_bomba = LaunchConfiguration('tiempo_calibracion_bomba')
     tiempo_barrido_brazo = LaunchConfiguration('tiempo_barrido_brazo')
     tiempo_delay_brazo = LaunchConfiguration('tiempo_delay_brazo')
     tiempo_verificacion_maleza = LaunchConfiguration('tiempo_verificacion_maleza')
@@ -29,6 +30,7 @@ def generate_launch_description():
     desplazamiento_brazo_mm = LaunchConfiguration('desplazamiento_brazo_mm')
     usar_tfmini = LaunchConfiguration('usar_tfmini')
     usar_mapir = LaunchConfiguration('usar_mapir')
+    usar_bomba = LaunchConfiguration('usar_bomba')
 
     # Parámetros de calibración / umbralización de la cámara MAPIR
     modo_umbral = LaunchConfiguration('modo_umbral')
@@ -42,11 +44,18 @@ def generate_launch_description():
     mostrar_ventana = LaunchConfiguration('mostrar_ventana')
     log_calibracion = LaunchConfiguration('log_calibracion')
 
-    mapir_rutina_node = Node(
+    # Nodo unificado que gestiona los 4 casos posibles de (usar_mapir x usar_bomba):
+    # - usar_mapir:=true  usar_bomba:=true  -> Calibra bomba 5s + inspecciona MAPIR + barrido con bomba si hay maleza
+    # - usar_mapir:=true  usar_bomba:=false -> Sin calibración bomba + inspecciona MAPIR + barrido sin bomba si hay maleza
+    # - usar_mapir:=false usar_bomba:=true  -> Calibra bomba 5s + sin MAPIR + barrido con bomba en cada árbol
+    # - usar_mapir:=false usar_bomba:=false -> Sin calibración bomba + sin MAPIR + barrido sin bomba en cada árbol
+    bomba_rutina_node = Node(
         package='sensado',
-        executable='mapir_rutina_navegacion',
-        name='mapir_rutina_navegacion',
+        executable='bomba_rutina_navegacion',
+        name='bomba_rutina_navegacion',
         parameters=[{
+            'usar_mapir': usar_mapir,
+            'usar_bomba': usar_bomba,
             'distancia_meta': distancia_meta,
             'distancia_frenado': distancia_frenado,
             'velocidad_avance': velocidad_avance,
@@ -56,6 +65,7 @@ def generate_launch_description():
             'umbral_angulo_reanudar': umbral_angulo_reanudar,
             'meta_arboles': meta_arboles,
             'timeout_sin_arbol': timeout_sin_arbol,
+            'tiempo_calibracion_bomba': tiempo_calibracion_bomba,
             'tiempo_barrido_brazo': tiempo_barrido_brazo,
             'tiempo_delay_brazo': tiempo_delay_brazo,
             'tiempo_verificacion_maleza': tiempo_verificacion_maleza,
@@ -63,31 +73,6 @@ def generate_launch_description():
             'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
             'usar_tfmini': usar_tfmini,
         }],
-        condition=IfCondition(usar_mapir),
-        output='screen',
-    )
-
-    real_rutina_node = Node(
-        package='sensado',
-        executable='real_rutina_navegacion',
-        name='real_rutina_navegacion',
-        parameters=[{
-            'distancia_meta': distancia_meta,
-            'distancia_frenado': distancia_frenado,
-            'velocidad_avance': velocidad_avance,
-            'velocidad_correccion': velocidad_correccion,
-            'kd_rumbo': kd_rumbo,
-            'umbral_angulo_lento': umbral_angulo_lento,
-            'umbral_angulo_reanudar': umbral_angulo_reanudar,
-            'meta_arboles': meta_arboles,
-            'timeout_sin_arbol': timeout_sin_arbol,
-            'tiempo_barrido_brazo': tiempo_barrido_brazo,
-            'tiempo_delay_brazo': tiempo_delay_brazo,
-            'tiempo_brazo_extendido': tiempo_brazo_extendido,
-            'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
-            'usar_tfmini': usar_tfmini,
-        }],
-        condition=UnlessCondition(usar_mapir),
         output='screen',
     )
 
@@ -161,6 +146,11 @@ def generate_launch_description():
             description='Tiempo máximo sin detectar un árbol antes de detenerse (s)',
         ),
         DeclareLaunchArgument(
+            'tiempo_calibracion_bomba',
+            default_value='5.0',
+            description='Tiempo inicial con brazo extendido y bomba activa para llenar la manguera al encender (s)',
+        ),
+        DeclareLaunchArgument(
             'tiempo_barrido_brazo',
             default_value='2.5',
             description='Tiempo que el robot avanza con el brazo extendido realizando el barrido (s)',
@@ -193,7 +183,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'usar_mapir',
             default_value='true',
-            description='Habilitar cámara MAPIR y rutina con verificación de maleza (true/false)',
+            description='Habilitar cámara MAPIR y verificación de maleza antes de barrer (true/false)',
+        ),
+        DeclareLaunchArgument(
+            'usar_bomba',
+            default_value='true',
+            description='Habilitar calibración inicial de 5s y activación de la bomba durante el barrido (true/false)',
         ),
         DeclareLaunchArgument(
             'modo_umbral',
@@ -296,7 +291,8 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Cámara MAPIR y detección calibrada de maleza NIR (sensado/integracion_mapir)
+        # Cámara MAPIR y detección calibrada de maleza NIR (sensado/integracion_mapir_bomba)
+        # Se lanzan únicamente cuando usar_mapir:=true
         # ---------------------------------------------------------------------
         Node(
             package='sensado',
@@ -355,20 +351,12 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Control autónomo CON cámara MAPIR (por defecto: usar_mapir:=true)
-        # y respaldo SIN cámara MAPIR (usar_mapir:=false), con cierre automático
+        # Control autónomo de rutina (cubre los 4 casos de usar_mapir x usar_bomba)
         # ---------------------------------------------------------------------
-        mapir_rutina_node,
-        real_rutina_node,
+        bomba_rutina_node,
         RegisterEventHandler(
             OnProcessExit(
-                target_action=mapir_rutina_node,
-                on_exit=[EmitEvent(event=Shutdown(reason='Rutina MAPIR finalizada'))],
-            )
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=real_rutina_node,
+                target_action=bomba_rutina_node,
                 on_exit=[EmitEvent(event=Shutdown(reason='Rutina de navegacion finalizada'))],
             )
         ),

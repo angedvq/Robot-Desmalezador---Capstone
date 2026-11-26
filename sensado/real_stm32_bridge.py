@@ -66,6 +66,7 @@ class RealSTM32Bridge(Node):
         self.ultimo_rumbo = 0.0
         self.ultimo_cmd = 0.0
         self.bomba_encendida = False
+        self.brazo_extendido_confirmado = False
         self.stop_solicitado = False
         self.en_movimiento = False
         self.primer_arranque = True
@@ -141,6 +142,7 @@ class RealSTM32Bridge(Node):
         if nuevo_stop and not self.stop_solicitado:
             self.velocidad = 0.0
             self.en_movimiento = False
+            self.bomba_encendida = False
             self.pendientes.clear()
             self.pendientes.appendleft((STOP_ALL, 0.0))
 
@@ -157,10 +159,27 @@ class RealSTM32Bridge(Node):
             self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
 
     def recibir_bomba(self, msg: Bool):
-        """Enciende o apaga la bomba (falta implementar la MAPIR)"""
-        self.bomba_encendida = bool(msg.data)
+        """
+        Enciende (START_BOMBA = 7) o apaga (STOP_BOMBA = 8) la bomba.
+        Por seguridad (y en concordancia con bomba.c de la STM32 donde se exige screw_mm > 390 mm),
+        solo permite encender la bomba si la STM32 ya confirmó que el brazo está totalmente extendido (código 4).
+        """
+        solicita_encender = bool(msg.data)
         self.ultimo_cmd = time.monotonic()
-        self.pendientes.append((START_BOMBA if self.bomba_encendida else STOP_BOMBA, 0.0))
+
+        if solicita_encender:
+            if not self.brazo_extendido_confirmado:
+                self.get_logger().warn(
+                    "[BOMBA] Solicitud de encender bomba rechazada: el brazo NO está confirmado como extendido (código 4)."
+                )
+                return
+            self.bomba_encendida = True
+            self.pendientes.append((START_BOMBA, 0.0))
+            self.get_logger().info("Orden bomba añadida: ENCENDER (START_Bomba = 7)")
+        else:
+            self.bomba_encendida = False
+            self.pendientes.append((STOP_BOMBA, 0.0))
+            self.get_logger().info("Orden bomba añadida: APAGAR (STOP_Bomba = 8)")
 
     def recibir_brazo(self, msg: Float32):
         """
@@ -172,10 +191,20 @@ class RealSTM32Bridge(Node):
         self.ultimo_cmd = time.monotonic()
         desplazamiento_mm = float(msg.data)
 
+        # Si el brazo se va a retraer o detener, invalida inmediatamente el estado de brazo extendido
+        # y asegura que la bomba quede apagada antes de retraer
+        if desplazamiento_mm <= 1e-3:
+            self.brazo_extendido_confirmado = False
+            if self.bomba_encendida:
+                self.bomba_encendida = False
+                self.pendientes.append((STOP_BOMBA, 0.0))
+
         # Si el valor de extension del brazo se acerca a 0, abortar movimiento
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
         else:
+            if desplazamiento_mm > 0.0:
+                self.brazo_extendido_confirmado = False
             desplazamiento_cm = desplazamiento_mm / 10.0
             self.pendientes.append((MOVE_STEPPER, desplazamiento_cm))
             accion = "EXTENDER" if desplazamiento_cm > 0.0 else "RETRAER"
@@ -205,6 +234,11 @@ class RealSTM32Bridge(Node):
             print(b0,b1)
             if (b0 ^ 0xA5) == b1 and b0 in MENSAJES_STM32:
                 if b0 in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
+                    if b0 == BRAZO_EXTENDIDO:
+                        self.brazo_extendido_confirmado = True
+                    elif b0 == BRAZO_RETRAIDO:
+                        self.brazo_extendido_confirmado = False
+                        self.bomba_encendida = False
                     self.get_logger().info(
                         f"[STM32 -> RPi] Mensaje ({b0}): {MENSAJES_STM32[b0]}"
                     )

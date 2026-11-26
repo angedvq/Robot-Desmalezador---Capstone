@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-Nodo de control autónomo de navegación por hilera de árboles con inspección de maleza
-mediante cámara MAPIR y modo de barrido del brazo (`mapir_rutina_navegacion.py`).
+Nodo de control autónomo de navegación por hilera de árboles con integración
+configurable de cámara MAPIR (`usar_mapir`) y bomba de rociado (`usar_bomba`).
 
-Flujo de la máquina de estados:
-1. `AVANZANDO`:
-   Avanza corrigiendo rumbo con control PID (`kp=30`, `ki=5`, `kd=5`) y ajuste dinámico
-   de velocidad (`0.20 m/s` normal / `0.065 m/s` si el ángulo a corregir es >= 18°),
-   buscando troncos con el RPLidar A1 (`/arboles_detectados`) a `distancia_meta = 0.85 m`.
-2. `VERIFICANDO_MALEZA`:
-   Al detectar un tronco a la altura del LiDAR, envía `STOP_Mov` inmediatamente para detener
-   las ruedas y consulta durante `tiempo_verificacion_maleza` (2.0 s) el tópico
-   `/rutina/maleza_detectada` publicado por `mapir_procesamiento_nir`:
-   - Si y solo si la cámara MAPIR detecta maleza: activa el barrido del brazo pasando a
-     `EXTENDIENDO_BRAZO` (+600 mm, espera código 4 de STM32) -> `BARRIENDO_BRAZO` (avanza
-     durante `tiempo_barrido_brazo` = 2.5 s con el brazo extendido y luego envía `STOP_Mov`) ->
-     `RETRAYENDO_BRAZO` (-600 mm, espera código 3 de STM32) -> `ENFRIAMIENTO` (o `FINALIZADO`).
-   - Si NO hay maleza: NO acciona el brazo y pasa directamente a `ENFRIAMIENTO` (o `FINALIZADO`
-     si ya alcanzó `meta_arboles`) para continuar hacia el siguiente tronco.
+Ubicación: `sensado/integracion_mapir_bomba/bomba_rutina_navegacion.py`
+
+Soporta los 4 modos de operación posibles:
+1. `usar_mapir=True`,  `usar_bomba=True`  (MAPIR + Bomba):
+   - Al encender: realiza calibración de bomba (extiende brazo -> activa bomba 5s -> apaga bomba -> retrae brazo).
+   - En cada árbol: se detiene (`STOP_Mov`) e inspecciona maleza con la cámara MAPIR (2s).
+     Si y solo si hay maleza: extiende brazo -> activa bomba -> barre por 2.5s -> detiene bomba -> retrae brazo.
+     Si NO hay maleza: continúa al siguiente árbol sin mover el brazo ni activar la bomba.
+2. `usar_mapir=True`,  `usar_bomba=False` (Solo MAPIR, sin bomba):
+   - Al encender: inicia directamente buscando árboles (sin cebado de bomba).
+   - En cada árbol: se detiene e inspecciona con la cámara MAPIR.
+     Si y solo si hay maleza: extiende brazo -> barre por 2.5s (sin bomba) -> retrae brazo.
+     Si NO hay maleza: continúa al siguiente árbol sin mover el brazo.
+3. `usar_mapir=False`, `usar_bomba=True`  (Solo Bomba, sin MAPIR):
+   - Al encender: realiza calibración de bomba (extiende brazo -> activa bomba 5s -> apaga bomba -> retrae brazo).
+   - En cada árbol: se detiene (`STOP_Mov`) -> extiende brazo -> activa bomba -> barre por 2.5s -> detiene bomba -> retrae brazo.
+4. `usar_mapir=False`, `usar_bomba=False` (Ni Bomba ni MAPIR):
+   - Al encender: inicia directamente buscando árboles (sin cebado de bomba).
+   - En cada árbol: se detiene (`STOP_Mov`) -> extiende brazo -> barre por 2.5s (sin bomba) -> retrae brazo.
 """
 
 import math
@@ -32,14 +36,18 @@ STM32_BRAZO_RETRAIDO = 3   # Código enviado por la STM32 cuando el brazo termin
 STM32_BRAZO_EXTENDIDO = 4  # Código enviado por la STM32 cuando el brazo terminó de extenderse
 
 
-class MapirRutinaNavegacion(Node):
-    def __init__(self):
-        super().__init__('mapir_rutina_navegacion')
+class BombaRutinaNavegacion(Node):
+    def __init__(self, nombre_nodo='bomba_rutina_navegacion', default_usar_mapir=True, default_usar_bomba=True):
+        super().__init__(nombre_nodo)
 
         # ---------------------------------------------------------------------
         # Declaración de parámetros
         # ---------------------------------------------------------------------
-        # Parámetros geométricos y de avance (sincronizados con correccion_trayectoria)
+        # Flags de activación de subsistemas (permiten cubrir los 4 casos)
+        self.declare_parameter('usar_mapir', default_usar_mapir)
+        self.declare_parameter('usar_bomba', default_usar_bomba)
+
+        # Parámetros geométricos y de avance
         self.declare_parameter('distancia_meta', 0.85)         # Distancia a la hilera (m)
         self.declare_parameter('distancia_frenado', 0.50)      # Umbral obstáculo TF-Mini (m)
         self.declare_parameter('velocidad_avance', 0.20)       # Velocidad lineal habitual (m/s)
@@ -56,16 +64,17 @@ class MapirRutinaNavegacion(Node):
         self.declare_parameter('umbral_angulo_lento', 18.0)    # Ángulo de corrección (>=) que activa baja velocidad (0.065 m/s)
         self.declare_parameter('umbral_angulo_reanudar', 6.0)  # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
-        # Parámetros de la rutina de árboles, inspección MAPIR y barrido del brazo
+        # Parámetros de la rutina de árboles, inspección MAPIR, bomba y barrido del brazo
         self.declare_parameter('meta_arboles', 4)
         self.declare_parameter('timeout_sin_arbol', 50.0)
-        self.declare_parameter('tiempo_barrido_brazo', 2.5)        # Tiempo avanzando con el brazo extendido haciendo barrido (s)
-        self.declare_parameter('tiempo_delay_brazo', 1.5)          # Parámetro legado (no usado en modo barrido)
-        self.declare_parameter('tiempo_verificacion_maleza', 2.0)  # Ventana de inspección MAPIR estando detenido (s)
+        self.declare_parameter('tiempo_calibracion_bomba', 5.0)     # Tiempo inicial cebando la manguera con brazo extendido (s)
+        self.declare_parameter('tiempo_barrido_brazo', 2.5)         # Tiempo avanzando con el brazo extendido haciendo barrido (s)
+        self.declare_parameter('tiempo_delay_brazo', 1.5)           # Parámetro legado
+        self.declare_parameter('tiempo_verificacion_maleza', 2.0)   # Ventana de inspección MAPIR estando detenido (s)
         self.declare_parameter('tiempo_estabilizacion_camara', 0.3) # Espera tras frenar antes de muestrear MAPIR (s)
-        self.declare_parameter('tiempo_brazo_extendido', 2.0)      # Parámetro legado / respaldo (s)
-        self.declare_parameter('tiempo_enfriamiento', 3.0)         # Ceguera temporal para avanzar al siguiente tronco (s)
-        self.declare_parameter('desplazamiento_brazo_mm', 600.0)   # +600 mm (+60 cm) extiende, -600 mm retrae
+        self.declare_parameter('tiempo_brazo_extendido', 2.0)       # Parámetro legado / respaldo (s)
+        self.declare_parameter('tiempo_enfriamiento', 3.0)          # Ceguera temporal para avanzar al siguiente tronco (s)
+        self.declare_parameter('desplazamiento_brazo_mm', 600.0)    # +600 mm (+60 cm) extiende, -600 mm retrae
 
         # Watchdogs de sensores reales
         self.declare_parameter('usar_tfmini', True)
@@ -73,6 +82,9 @@ class MapirRutinaNavegacion(Node):
         self.declare_parameter('tfmini_timeout', 1.5)
 
         # Lectura de parámetros
+        self.usar_mapir = bool(self.get_parameter('usar_mapir').value)
+        self.usar_bomba = bool(self.get_parameter('usar_bomba').value)
+
         self.distancia_meta = float(self.get_parameter('distancia_meta').value)
         self.distancia_frenado = float(self.get_parameter('distancia_frenado').value)
         self.velocidad_avance = float(self.get_parameter('velocidad_avance').value)
@@ -89,6 +101,7 @@ class MapirRutinaNavegacion(Node):
 
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
+        self.tiempo_calibracion_bomba = float(self.get_parameter('tiempo_calibracion_bomba').value)
         self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
         self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_verificacion_maleza = float(self.get_parameter('tiempo_verificacion_maleza').value)
@@ -109,6 +122,7 @@ class MapirRutinaNavegacion(Node):
         self.stop_mov_pub = self.create_publisher(Bool, '/navegacion/stop_mov', 10)
         self.grados_pub = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
         self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
+        self.bomba_pub = self.create_publisher(Bool, '/bomba', 10)
 
         # ---------------------------------------------------------------------
         # Suscriptores de percepción (LiDAR, TF-Mini, MAPIR) y STM32
@@ -131,8 +145,11 @@ class MapirRutinaNavegacion(Node):
 
         # ---------------------------------------------------------------------
         # Variables de estado y temporizadores
+        # Si `usar_bomba=True`, inicia en `CAL_EXTENDIENDO_BRAZO` para cebar la manguera 5s.
+        # Si `usar_bomba=False`, salta la calibración de bomba e inicia directo en `AVANZANDO`.
         # ---------------------------------------------------------------------
-        self.estado_actual = 'AVANZANDO'
+        self.estado_actual = 'CAL_EXTENDIENDO_BRAZO' if self.usar_bomba else 'AVANZANDO'
+        self.calibracion_bomba_completada = not self.usar_bomba
         self.arboles_procesados = 0
         self.arboles_con_maleza = 0
         self.arbol_en_mira = False
@@ -144,13 +161,14 @@ class MapirRutinaNavegacion(Node):
         self.maleza_detectada_en_parada = False
         self.max_cobertura_en_parada = 0.0
 
-        # Estado del brazo (STM32)
+        # Estado del brazo y de la bomba (STM32)
         self.brazo_extendido = False
+        self.bomba_activa = False
         self.orden_extender_enviada = False
         self.orden_retraer_enviada = False
         self.stm32_brazo_extendido = False
         self.stm32_brazo_retraido = False
-        self.brazo_retraido_confirmado = True
+        self.brazo_retraido_confirmado = not self.usar_bomba
 
         # Métricas acumuladas para el reporte final de la rutina
         self.inicio_rutina_ts = None
@@ -192,9 +210,10 @@ class MapirRutinaNavegacion(Node):
         self.control_timer = self.create_timer(self.dt, self.control_loop)
 
         self.get_logger().info(
-            f"mapir_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
-            f"Inspección MAPIR: {self.tiempo_verificacion_maleza:.1f}s | "
-            f"Modo BARRIDO (solo si hay maleza): {self.tiempo_barrido_brazo:.1f}s | "
+            f"{nombre_nodo} iniciado | Meta: {self.meta_arboles} árboles | "
+            f"MAPIR: {'SI' if self.usar_mapir else 'NO'} | "
+            f"BOMBA: {'SI (calibración ' + f'{self.tiempo_calibracion_bomba:.1f}s)' if self.usar_bomba else 'NO (solo barrido seco)'} | "
+            f"Barrido: {self.tiempo_barrido_brazo:.1f}s | "
             f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm (confirmación STM32: 4=ext, 3=ret)"
         )
 
@@ -230,8 +249,6 @@ class MapirRutinaNavegacion(Node):
         self.ultimo_mapir_ts = now
         self.maleza_actual_topic = bool(msg.data)
 
-        # Si estamos detenidos verificando maleza frente al tronco y ya pasó el breve
-        # tiempo de estabilización tras frenar, registrar detección positiva
         if self.estado_actual == 'VERIFICANDO_MALEZA':
             if (now - self.tiempo_inicio_estado) >= self.tiempo_estabilizacion_camara:
                 if self.maleza_actual_topic:
@@ -295,7 +312,7 @@ class MapirRutinaNavegacion(Node):
         """
         Envía el comando de brazo hacia la STM32 a través de /brazo_mm:
         - 'EXTENDER': envía +desplazamiento_brazo_mm
-        - 'RETRAER':  envía -desplazamiento_brazo_mm
+        - 'RETRAER':  envía -desplazamiento_brazo_mm (garantizando apagar la bomba antes)
         """
         msg_brazo = Float32()
         if accion == 'EXTENDER':
@@ -305,16 +322,48 @@ class MapirRutinaNavegacion(Node):
                 f"[BRAZO] Extendiendo brazo (+{self.desplazamiento_brazo_mm / 10.0:.1f} cm)..."
             )
         elif accion == 'RETRAER':
+            if self.bomba_activa:
+                self.comandar_bomba(False)
             msg_brazo.data = -self.desplazamiento_brazo_mm
             self.brazo_extendido = False
             self.get_logger().info(
                 f"[BRAZO] Retrayendo brazo (-{self.desplazamiento_brazo_mm / 10.0:.1f} cm)..."
             )
         else:
+            if self.bomba_activa:
+                self.comandar_bomba(False)
             msg_brazo.data = 0.0
             self.brazo_extendido = False
 
         self.brazo_pub.publish(msg_brazo)
+
+    def comandar_bomba(self, encender: bool):
+        """
+        Envía orden a la bomba (/bomba -> START_BOMBA=7 / STOP_BOMBA=8 en STM32).
+        - Si `self.usar_bomba` es False, mantiene la bomba apagada siempre.
+        - Si `self.usar_bomba` es True, solo permite encenderla si y solo si la STM32 ya
+          confirmó que el brazo está totalmente extendido (`self.stm32_brazo_extendido == True`, código 4).
+        """
+        if encender:
+            if not self.usar_bomba:
+                return
+            if not (self.brazo_extendido and self.stm32_brazo_extendido):
+                self.get_logger().warn(
+                    "[BOMBA] Bloqueo de seguridad: no se puede activar la bomba si el brazo no está completamente extendido (código 4)."
+                )
+                return
+            self.bomba_activa = True
+            msg_bomba = Bool()
+            msg_bomba.data = True
+            self.bomba_pub.publish(msg_bomba)
+            self.get_logger().info("[BOMBA] Bomba ACTIVADA (START_Bomba).")
+        else:
+            if self.bomba_activa or self.usar_bomba:
+                self.bomba_activa = False
+                msg_bomba = Bool()
+                msg_bomba.data = False
+                self.bomba_pub.publish(msg_bomba)
+                self.get_logger().info("[BOMBA] Bomba DETENIDA (STOP_Bomba).")
 
     def comandar_stop_mov(self):
         """
@@ -331,7 +380,12 @@ class MapirRutinaNavegacion(Node):
         self.cmd_pub.publish(msg_vel)
 
     def detener_todo_emergencia(self):
-        """Envía STOP_All y velocidad 0.0 m/s."""
+        """Envía STOP_All, apaga la bomba y fija velocidad 0.0 m/s."""
+        self.bomba_activa = False
+        msg_bomba = Bool()
+        msg_bomba.data = False
+        self.bomba_pub.publish(msg_bomba)
+
         msg_stop = Bool()
         msg_stop.data = True
         self.stop_pub.publish(msg_stop)
@@ -377,6 +431,8 @@ class MapirRutinaNavegacion(Node):
                 "                 REPORTE FINAL DE LA RUTINA                 \n"
                 "============================================================\n"
                 f" Motivo de término   : {self.motivo_fin_rutina}\n"
+                f" Modo de operación   : MAPIR={'SI' if self.usar_mapir else 'NO'} | "
+                f"BOMBA={'SI' if self.usar_bomba else 'NO'}\n"
                 f" Tiempo de rutina    : {self.tiempo_rutina_total:.2f} s ({minutos}m {segundos:04.1f}s)\n"
                 f" Velocidad promedio  : {self.velocidad_promedio:.3f} m/s "
                 f"(distancia est.: {self.distancia_recorrida:.2f} m)\n"
@@ -408,11 +464,9 @@ class MapirRutinaNavegacion(Node):
 
         angulo_correccion = 0.0
 
-        # Si tenemos un tronco guia vigente, aplica corrección PID (Proporcional + Integral + Derivativa)
         if tronco_guia_vigente:
             error = self.distancia_tronco_actual - self.distancia_meta
 
-            # Cálculo del término derivativo filtrado sobre la evolución continua del error lateral
             if self.error_previo is None:
                 self.derivada_error_filtrada = 0.0
             else:
@@ -422,23 +476,20 @@ class MapirRutinaNavegacion(Node):
                 )
             self.error_previo = error
 
-            if abs(error) < 0.03:  # Dentro de +-3 cm de distancia_meta (0.85 m): mantener rumbo base actual
+            if abs(error) < 0.03:
                 rumbo_objetivo = self.rumbo_integral
                 angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
             else:
-                # 1. Término Integral (acotado al 60% del rumbo máximo)
                 self.rumbo_integral += error * self.ki_rumbo * self.dt
                 self.rumbo_integral = max(
                     -0.6 * self.max_grados_rumbo,
                     min(0.6 * self.max_grados_rumbo, self.rumbo_integral),
                 )
 
-                # 2. Término Proporcional con ángulo mínimo efectivo para mover las 4 ruedas
                 termino_p = error * self.kp_rumbo
                 if abs(error) >= 0.04 and abs(termino_p) < self.min_grados_rumbo:
                     termino_p = math.copysign(self.min_grados_rumbo, error)
 
-                # 3. Término Derivativo (acotado a +-12° para amortiguar sin amplificar ruido del LiDAR)
                 termino_d = max(
                     -12.0,
                     min(12.0, self.kd_rumbo * self.derivada_error_filtrada),
@@ -450,22 +501,18 @@ class MapirRutinaNavegacion(Node):
                     min(self.max_grados_rumbo, self.rumbo_integral + correccion_pd),
                 )
 
-                # Magnitud del ángulo que el robot necesita corregir en este instante
                 angulo_correccion = max(
                     abs(correccion_pd),
                     abs(rumbo_objetivo - self.rumbo_suavizado),
                     abs(rumbo_objetivo),
                 )
         else:
-            # En el claro entre árboles o últimos 25 cm antes del tronco, mantener el rumbo base alineado
             self.error_previo = None
             self.derivada_error_filtrada = 0.0
             rumbo_objetivo = self.rumbo_integral
             angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
 
-        # ---------------------------------------------------------------------
         # Lógica de separación de casos de velocidad según ángulo de corrección
-        # ---------------------------------------------------------------------
         if not permitir_correccion_lateral or not tronco_guia_vigente:
             if self.en_correccion_lenta:
                 self.en_correccion_lenta = False
@@ -489,7 +536,7 @@ class MapirRutinaNavegacion(Node):
                     f"({self.velocidad_avance:.2f} m/s)"
                 )
 
-        # Limitador de pendiente (slew-rate) para que todo giro sea suave
+        # Limitador de pendiente (slew-rate)
         max_paso = self.slew_rate_deg_s * self.dt
         delta = rumbo_objetivo - self.rumbo_suavizado
         if abs(delta) <= max_paso:
@@ -497,7 +544,6 @@ class MapirRutinaNavegacion(Node):
         else:
             self.rumbo_suavizado += math.copysign(max_paso, delta)
 
-        # Se envia orden a stm32 solo si hubo un cambio significante (0.5°) para no saturar
         diferencia = abs(self.rumbo_suavizado - self.ultimo_rumbo_enviado)
         retorno_a_cero = (self.rumbo_suavizado == 0.0 and self.ultimo_rumbo_enviado != 0.0)
         requiere_refresco = (now - self.ultimo_envio_grados_ts) >= 1.0
@@ -558,6 +604,9 @@ class MapirRutinaNavegacion(Node):
 
         # Verificación de Watchdogs de Sensores
         detenido_en_arbol = self.estado_actual in (
+            'CAL_EXTENDIENDO_BRAZO',
+            'CAL_BOMBA_ACTIVA',
+            'CAL_RETRAYENDO_BRAZO',
             'VERIFICANDO_MALEZA',
             'EXTENDIENDO_BRAZO',
             'RETRAYENDO_BRAZO',
@@ -568,7 +617,6 @@ class MapirRutinaNavegacion(Node):
             or (self.ultimo_tfmini_ts is not None and (now - self.ultimo_tfmini_ts) <= self.tfmini_timeout)
         )
 
-        # Si algún sensor falla mientras el robot se desplaza, freno de emergencia.
         if (not lidar_ok or not tfmini_ok) and not detenido_en_arbol:
             if not self.en_pausa_por_watchdog:
                 self._pausar_relojes(now)
@@ -591,7 +639,10 @@ class MapirRutinaNavegacion(Node):
                 self.inicio_rutina_ts = now
             self._restaurar_relojes(now)
             self.en_pausa_por_watchdog = False
-            self.get_logger().info("Sensores ok. Iniciando/reanudando rutina con integración MAPIR y barrido")
+            self.get_logger().info(
+                f"Sensores ok. Iniciando/reanudando rutina "
+                f"(MAPIR={'SI' if self.usar_mapir else 'NO'}, BOMBA={'SI' if self.usar_bomba else 'NO'})"
+            )
 
         # ---------------------------------------------------------------------
         # Obstáculo Frontal (solo detiene cuando el robot pretende avanzar)
@@ -625,11 +676,66 @@ class MapirRutinaNavegacion(Node):
         msg_vel = Twist()
 
         # ---------------------------------------------------------------------
-        # Máquina de Estados: Navegación + Inspección MAPIR + Barrido de Brazo
+        # Máquina de Estados:
+        # Fase 0: Calibración inicial de bomba al encender (solo si usar_bomba=True)
+        # Fase 1: Navegación + Inspección MAPIR (si usar_mapir=True) + Barrido (con o sin Bomba)
         # ---------------------------------------------------------------------
-        if self.estado_actual == 'AVANZANDO':
-            # Garantía de seguridad: solo avanzar si el brazo está retraído
-            if not self.brazo_retraido_confirmado or self.brazo_extendido:
+        if self.estado_actual == 'CAL_EXTENDIENDO_BRAZO':
+            msg_vel.linear.x = 0.0
+
+            if not self.orden_extender_enviada and tiempo_transcurrido >= 0.50:
+                self.stm32_brazo_extendido = False
+                self.comandar_brazo('EXTENDER')
+                self.orden_extender_enviada = True
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
+                    "al encender el robot (esperando código 4 de STM32)..."
+                )
+
+            if self.orden_extender_enviada and self.stm32_brazo_extendido:
+                self.comandar_bomba(True)
+                self.estado_actual = 'CAL_BOMBA_ACTIVA'
+                self.tiempo_inicio_estado = now
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Brazo extendido confirmado (código 4). "
+                    f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
+                )
+
+        elif self.estado_actual == 'CAL_BOMBA_ACTIVA':
+            msg_vel.linear.x = 0.0
+
+            if tiempo_transcurrido >= self.tiempo_calibracion_bomba:
+                self.comandar_bomba(False)
+                self.stm32_brazo_retraido = False
+                self.orden_retraer_enviada = False
+                self.estado_actual = 'CAL_RETRAYENDO_BRAZO'
+                self.tiempo_inicio_estado = now
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Cebado de {self.tiempo_calibracion_bomba:.1f}s completado. "
+                    f"Bomba apagada. Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
+                )
+
+        elif self.estado_actual == 'CAL_RETRAYENDO_BRAZO':
+            msg_vel.linear.x = 0.0
+
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.15:
+                self.comandar_brazo('RETRAER')
+                self.orden_retraer_enviada = True
+
+            if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
+                self.brazo_retraido_confirmado = True
+                self.calibracion_bomba_completada = True
+                self.estado_actual = 'AVANZANDO'
+                self.tiempo_inicio_estado = now
+                self.tiempo_ultimo_arbol = now
+                self.get_logger().info(
+                    "[CALIBRACIÓN BOMBA] Brazo retraído confirmado (código 3). "
+                    "Calibración de bomba finalizada. Iniciando rutina de búsqueda de árboles..."
+                )
+
+        elif self.estado_actual == 'AVANZANDO':
+            # Garantía de seguridad: solo avanzar si el brazo está retraído y la bomba apagada
+            if not self.brazo_retraido_confirmado or self.brazo_extendido or self.bomba_activa:
                 msg_vel.linear.x = 0.0
                 self.cmd_pub.publish(msg_vel)
                 return
@@ -650,8 +756,7 @@ class MapirRutinaNavegacion(Node):
                 )
                 return
 
-            # Detección de tronco confirmada a la altura del LiDAR:
-            # Detenerse inmediatamente con STOP_Mov y verificar con la cámara MAPIR si hay maleza
+            # Detección de tronco confirmada a la altura del LiDAR
             if self.arbol_en_mira:
                 self.arboles_procesados += 1
                 self.tiempo_inicio_estado = now
@@ -664,21 +769,35 @@ class MapirRutinaNavegacion(Node):
                 self.error_previo = None
                 self.derivada_error_filtrada = 0.0
                 self.en_correccion_lenta = False
-                self.maleza_detectada_en_parada = False
-                self.max_cobertura_en_parada = 0.0
-                self.estado_actual = 'VERIFICANDO_MALEZA'
-                self.get_logger().info(
-                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
-                    f"Enviando STOP_Mov inmediatamente y verificando maleza con cámara MAPIR "
-                    f"({self.tiempo_verificacion_maleza:.1f}s)..."
-                )
+
+                if self.usar_mapir:
+                    # Con MAPIR activa: detenerse y verificar durante 2s si hay maleza antes de mover el brazo
+                    self.maleza_detectada_en_parada = False
+                    self.max_cobertura_en_parada = 0.0
+                    self.estado_actual = 'VERIFICANDO_MALEZA'
+                    self.get_logger().info(
+                        f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
+                        f"Enviando STOP_Mov inmediatamente y verificando maleza con cámara MAPIR "
+                        f"({self.tiempo_verificacion_maleza:.1f}s)..."
+                    )
+                else:
+                    # Sin MAPIR: pasar directamente a extender el brazo para hacer el barrido
+                    self.arboles_con_maleza += 1
+                    self.orden_extender_enviada = False
+                    self.orden_retraer_enviada = False
+                    self.stm32_brazo_extendido = False
+                    self.stm32_brazo_retraido = False
+                    self.brazo_retraido_confirmado = False
+                    self.estado_actual = 'EXTENDIENDO_BRAZO'
+                    self.get_logger().info(
+                        f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado (modo sin MAPIR). "
+                        f"Enviando STOP_Mov inmediatamente y extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm..."
+                    )
                 return
 
         elif self.estado_actual == 'VERIFICANDO_MALEZA':
-            # Robot detenido mientras la cámara MAPIR analiza si existe maleza junto al tronco
             msg_vel.linear.x = 0.0
 
-            # También considerar la lectura actual una vez pasado el tiempo de estabilización
             if tiempo_transcurrido >= self.tiempo_estabilizacion_camara and self.maleza_actual_topic:
                 self.maleza_detectada_en_parada = True
 
@@ -695,14 +814,15 @@ class MapirRutinaNavegacion(Node):
                 self.get_logger().info(
                     f"[MAPIR] Maleza DETECTADA en tronco {self.arboles_procesados}/{self.meta_arboles} "
                     f"(cobertura: {self.max_cobertura_en_parada:.1f}%). "
-                    f"Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm para iniciar barrido..."
+                    f"Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm para iniciar barrido "
+                    f"({'CON bomba' if self.usar_bomba else 'SIN bomba'})..."
                 )
 
-            # CASO B: Terminó el tiempo de inspección y NO hay maleza -> NO activar brazo y continuar
+            # CASO B: Terminó el tiempo de inspección y NO hay maleza -> NO activar brazo ni bomba y continuar
             elif tiempo_transcurrido >= self.tiempo_verificacion_maleza:
                 self.get_logger().info(
                     f"[MAPIR] SIN maleza en tronco {self.arboles_procesados}/{self.meta_arboles}. "
-                    "NO se acciona el brazo."
+                    "NO se acciona el brazo ni la bomba."
                 )
                 if self._finalizar_o_continuar_siguiente_arbol(
                     now, motivo_log="Sin maleza (barrido omitido)."
@@ -710,7 +830,6 @@ class MapirRutinaNavegacion(Node):
                     return
 
         elif self.estado_actual == 'EXTENDIENDO_BRAZO':
-            # Ruedas detenidas mientras el motor stepper recorre los +600 mm hasta que la STM32 envíe código 4
             msg_vel.linear.x = 0.0
 
             if not self.orden_extender_enviada and tiempo_transcurrido >= 0.10:
@@ -718,23 +837,27 @@ class MapirRutinaNavegacion(Node):
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
 
-            # Cuando la STM32 confirma código 4 (brazo extendido), inicia el avance de barrido por `tiempo_barrido_brazo`
+            # Cuando la STM32 confirma código 4 (brazo extendido), activa la bomba (si usar_bomba=True) e inicia barrido
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
+                if self.usar_bomba:
+                    self.comandar_bomba(True)
                 self.estado_actual = 'BARRIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
+                modo_barrido_txt = "Bomba ACTIVADA e iniciando" if self.usar_bomba else "Iniciando (sin bomba)"
                 self.get_logger().info(
                     f"STM32 confirmó brazo extendido (código 4). "
-                    f"Iniciando barrido: avanzando durante {self.tiempo_barrido_brazo:.1f}s con brazo extendido..."
+                    f"{modo_barrido_txt} barrido durante {self.tiempo_barrido_brazo:.1f}s..."
                 )
 
         elif self.estado_actual == 'BARRIENDO_BRAZO':
-            # El robot avanza en línea recta con el brazo extendido durante `tiempo_barrido_brazo` (2.5 s)
-            # y luego se detiene con STOP_Mov para retraer el brazo
+            # Avanza en línea recta con el brazo extendido (y bomba activa si usar_bomba=True) durante `tiempo_barrido_brazo`
             if tiempo_transcurrido < self.tiempo_barrido_brazo:
                 msg_vel.linear.x = self.velocidad_avance
                 self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 msg_vel.linear.x = 0.0
+                if self.usar_bomba or self.bomba_activa:
+                    self.comandar_bomba(False)
                 self.comandar_stop_mov()
                 self.rumbo_integral = 0.0
                 self.rumbo_suavizado = 0.0
@@ -745,16 +868,14 @@ class MapirRutinaNavegacion(Node):
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
                     f"Barrido completado ({tiempo_transcurrido:.1f}s). "
-                    f"Enviando STOP_Mov y retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm "
-                    "(esperando confirmación código 3 de STM32)..."
+                    f"{'Bomba DETENIDA, ' if self.usar_bomba else ''}enviando STOP_Mov y retrayendo brazo "
+                    f"-{self.desplazamiento_brazo_mm:.0f}mm (esperando confirmación código 3 de STM32)..."
                 )
                 return
 
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
-            # Ruedas detenidas mientras el brazo se retrae; espera el mensaje código 3 de la STM32
             msg_vel.linear.x = 0.0
 
-            # Enviar la orden de retraer tras 0.10 s de haber detenido las ruedas del barrido
             if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.10:
                 self.comandar_brazo('RETRAER')
                 self.orden_retraer_enviada = True
@@ -762,13 +883,12 @@ class MapirRutinaNavegacion(Node):
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
                 self.brazo_retraido_confirmado = True
                 if self._finalizar_o_continuar_siguiente_arbol(
-                    now, motivo_log="Maleza barrida y brazo retraído (código 3 STM32)."
+                    now, motivo_log="Barrido completado y brazo retraído (código 3 STM32)."
                 ):
                     return
 
         elif self.estado_actual == 'ENFRIAMIENTO':
-            # Avanza ignorando el tronco que acaba de procesar, si y solo si el brazo está retraído
-            if not self.brazo_retraido_confirmado or self.brazo_extendido:
+            if not self.brazo_retraido_confirmado or self.brazo_extendido or self.bomba_activa:
                 msg_vel.linear.x = 0.0
                 self.cmd_pub.publish(msg_vel)
                 return
@@ -796,7 +916,7 @@ class MapirRutinaNavegacion(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MapirRutinaNavegacion()
+    node = BombaRutinaNavegacion()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):

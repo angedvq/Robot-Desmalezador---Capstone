@@ -13,8 +13,10 @@ import xml.etree.ElementTree as ET
 # ============================================================
 # 1. RUTAS Y LECTURA DEL MAPA
 # ============================================================
-archivo_xml = Path.home() / 'Capstone/ros2_ws/src/sensado/sensado/mapeo'/ 'mapa_arboles.xml' 
-archivo_svg = Path.home() / 'Capstone/ros2_ws/src/sensado/sensado/mapeo'/'mapa_arboles.svg' 
+directorio = Path(__file__).resolve().parent
+
+archivo_xml = directorio / 'mapa_arboles.xml'
+archivo_svg = directorio / 'mapa_arboles.svg'
 
 raiz = ET.parse(archivo_xml).getroot()
 puntos = [

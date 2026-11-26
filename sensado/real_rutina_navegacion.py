@@ -35,9 +35,11 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('umbral_angulo_lento', 18.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
         self.declare_parameter('umbral_angulo_reanudar', 6.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
-        # Parámetros de la rutina de árboles y brazo
+        # Parámetros de la rutina de árboles, bomba y brazo
+        self.declare_parameter('usar_bomba', False)               # Si es False, solo hace barrido con brazo; si es True, calibra y activa bomba
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 50.0)    
+        self.declare_parameter('tiempo_calibracion_bomba', 5.0)   # Tiempo inicial cebando la manguera con brazo extendido (s)
         self.declare_parameter('tiempo_barrido_brazo', 2.5)       # Tiempo avanzando con el brazo extendido haciendo barrido (s)
         self.declare_parameter('tiempo_delay_brazo', 1.5)         # Parámetro legado (no usado en modo barrido)
         self.declare_parameter('tiempo_brazo_extendido', 2.0)     # Respaldo / alias para duración con brazo extendido (s)
@@ -64,8 +66,10 @@ class RealRutinaNavegacion(Node):
         self.umbral_angulo_lento = float(self.get_parameter('umbral_angulo_lento').value)
         self.umbral_angulo_reanudar = float(self.get_parameter('umbral_angulo_reanudar').value)
 
+        self.usar_bomba = bool(self.get_parameter('usar_bomba').value)
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
+        self.tiempo_calibracion_bomba = float(self.get_parameter('tiempo_calibracion_bomba').value)
         self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
         self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_brazo_extendido = float(self.get_parameter('tiempo_brazo_extendido').value)
@@ -84,6 +88,7 @@ class RealRutinaNavegacion(Node):
         self.stop_mov_pub = self.create_publisher(Bool, '/navegacion/stop_mov', 10)
         self.grados_pub = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
         self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
+        self.bomba_pub = self.create_publisher(Bool, '/bomba', 10)
 
         # ---------------------------------------------------------------------
         # Suscriptores de percepción y confirmación de brazo STM32
@@ -96,17 +101,21 @@ class RealRutinaNavegacion(Node):
 
         # ---------------------------------------------------------------------
         # Variables de estado y temporizadores
+        # Si usar_bomba=True inicia en modo calibración/cebado de bomba (5s);
+        # si usar_bomba=False inicia directo en AVANZANDO.
         # ---------------------------------------------------------------------
-        self.estado_actual = 'AVANZANDO'
+        self.estado_actual = 'CAL_EXTENDIENDO_BRAZO' if self.usar_bomba else 'AVANZANDO'
+        self.calibracion_bomba_completada = not self.usar_bomba
         self.arboles_procesados = 0
         self.arboles_con_maleza = 0
         self.arbol_en_mira = False
         self.brazo_extendido = False
+        self.bomba_activa = False
         self.orden_extender_enviada = False
         self.orden_retraer_enviada = False
         self.stm32_brazo_extendido = False
         self.stm32_brazo_retraido = False
-        self.brazo_retraido_confirmado = True
+        self.brazo_retraido_confirmado = not self.usar_bomba
 
         # Métricas acumuladas para el reporte final de la rutina
         self.inicio_rutina_ts = None
@@ -230,7 +239,7 @@ class RealRutinaNavegacion(Node):
         """
         Envía el comando de brazo hacia la stm32 a través de /brazo_mm:
         - 'EXTENDER': envía +desplazamiento_brazo_mm
-        - 'RETRAER':  envía -desplazamiento_brazo_mm
+        - 'RETRAER':  envía -desplazamiento_brazo_mm (garantizando apagar la bomba antes)
         """
         msg_brazo = Float32()
         if accion == 'EXTENDER':
@@ -240,16 +249,47 @@ class RealRutinaNavegacion(Node):
                 f"[BRAZO] Extendiendo brazo (+{self.desplazamiento_brazo_mm / 10.0:.1f} cm)..."
             )
         elif accion == 'RETRAER':
+            if self.bomba_activa:
+                self.comandar_bomba(False)
             msg_brazo.data = -self.desplazamiento_brazo_mm
             self.brazo_extendido = False
             self.get_logger().info(
                 f"[BRAZO] Retrayendo brazo (-{self.desplazamiento_brazo_mm / 10.0:.1f} cm)..."
             )
         else:
+            if self.bomba_activa:
+                self.comandar_bomba(False)
             msg_brazo.data = 0.0
             self.brazo_extendido = False
 
         self.brazo_pub.publish(msg_brazo)
+
+    def comandar_bomba(self, encender: bool):
+        """
+        Envía orden a la bomba (/bomba -> START_BOMBA=7 / STOP_BOMBA=8 en STM32).
+        Solo permite activar la bomba si `usar_bomba=True` y la STM32 ya confirmó que el brazo
+        está totalmente extendido (`self.stm32_brazo_extendido == True`, código 4).
+        """
+        if encender:
+            if not self.usar_bomba:
+                return
+            if not (self.brazo_extendido and self.stm32_brazo_extendido):
+                self.get_logger().warn(
+                    "[BOMBA] Bloqueo de seguridad: no se puede activar la bomba si el brazo no está completamente extendido (código 4)."
+                )
+                return
+            self.bomba_activa = True
+            msg_bomba = Bool()
+            msg_bomba.data = True
+            self.bomba_pub.publish(msg_bomba)
+            self.get_logger().info("[BOMBA] Bomba ACTIVADA (START_Bomba).")
+        else:
+            if self.bomba_activa or self.usar_bomba:
+                self.bomba_activa = False
+                msg_bomba = Bool()
+                msg_bomba.data = False
+                self.bomba_pub.publish(msg_bomba)
+                self.get_logger().info("[BOMBA] Bomba DETENIDA (STOP_Bomba).")
 
     def comandar_stop_mov(self):
         """
@@ -267,8 +307,13 @@ class RealRutinaNavegacion(Node):
 
     def detener_todo_emergencia(self):
         """
-        Envía STOP_All y velocidad 0.0 m/s
+        Envía STOP_All, apaga la bomba y fija velocidad 0.0 m/s
         """
+        self.bomba_activa = False
+        msg_bomba = Bool()
+        msg_bomba.data = False
+        self.bomba_pub.publish(msg_bomba)
+
         msg_stop = Bool()
         msg_stop.data = True
         self.stop_pub.publish(msg_stop)
@@ -471,6 +516,9 @@ class RealRutinaNavegacion(Node):
 
         # Verificación de Watchdogs de Sensores. Revisa si pasó mucho tiempo desde la ultima recepcion de datos de sensores
         operando_brazo_detenido = self.estado_actual in (
+            'CAL_EXTENDIENDO_BRAZO',
+            'CAL_BOMBA_ACTIVA',
+            'CAL_RETRAYENDO_BRAZO',
             'EXTENDIENDO_BRAZO',
             'RETRAYENDO_BRAZO',
         )
@@ -539,11 +587,64 @@ class RealRutinaNavegacion(Node):
         msg_vel = Twist()
 
         # ---------------------------------------------------------------------
-        # Máquina de Estados de Navegación y Accionamiento de Brazo
+        # Máquina de Estados de Calibración de Bomba, Navegación y Barrido
         # ---------------------------------------------------------------------
-        if self.estado_actual == 'AVANZANDO':
-            # Garantía de seguridad: solo avanzar si el brazo está retraído
-            if not self.brazo_retraido_confirmado or self.brazo_extendido:
+        if self.estado_actual == 'CAL_EXTENDIENDO_BRAZO':
+            msg_vel.linear.x = 0.0
+
+            if not self.orden_extender_enviada and tiempo_transcurrido >= 0.50:
+                self.stm32_brazo_extendido = False
+                self.comandar_brazo('EXTENDER')
+                self.orden_extender_enviada = True
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
+                    "al encender el robot (esperando código 4 de STM32)..."
+                )
+
+            if self.orden_extender_enviada and self.stm32_brazo_extendido:
+                self.comandar_bomba(True)
+                self.estado_actual = 'CAL_BOMBA_ACTIVA'
+                self.tiempo_inicio_estado = now
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Brazo extendido confirmado (código 4). "
+                    f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
+                )
+
+        elif self.estado_actual == 'CAL_BOMBA_ACTIVA':
+            msg_vel.linear.x = 0.0
+
+            if tiempo_transcurrido >= self.tiempo_calibracion_bomba:
+                self.comandar_bomba(False)
+                self.stm32_brazo_retraido = False
+                self.orden_retraer_enviada = False
+                self.estado_actual = 'CAL_RETRAYENDO_BRAZO'
+                self.tiempo_inicio_estado = now
+                self.get_logger().info(
+                    f"[CALIBRACIÓN BOMBA] Cebado de {self.tiempo_calibracion_bomba:.1f}s completado. "
+                    f"Bomba apagada. Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
+                )
+
+        elif self.estado_actual == 'CAL_RETRAYENDO_BRAZO':
+            msg_vel.linear.x = 0.0
+
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.15:
+                self.comandar_brazo('RETRAER')
+                self.orden_retraer_enviada = True
+
+            if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
+                self.brazo_retraido_confirmado = True
+                self.calibracion_bomba_completada = True
+                self.estado_actual = 'AVANZANDO'
+                self.tiempo_inicio_estado = now
+                self.tiempo_ultimo_arbol = now
+                self.get_logger().info(
+                    "[CALIBRACIÓN BOMBA] Brazo retraído confirmado (código 3). "
+                    "Calibración de bomba finalizada. Iniciando rutina de búsqueda de árboles..."
+                )
+
+        elif self.estado_actual == 'AVANZANDO':
+            # Garantía de seguridad: solo avanzar si el brazo está retraído y la bomba apagada
+            if not self.brazo_retraido_confirmado or self.brazo_extendido or self.bomba_activa:
                 msg_vel.linear.x = 0.0
                 self.cmd_pub.publish(msg_vel)
                 return
@@ -601,23 +702,28 @@ class RealRutinaNavegacion(Node):
                 self.orden_extender_enviada = True
                 self.arboles_con_maleza += 1
 
-            # Cuando la STM32 confirma código 4 (brazo extendido), inicia el avance de barrido por 2.0 s
+            # Cuando la STM32 confirma código 4 (brazo extendido), activa la bomba (si usar_bomba=True) e inicia el avance de barrido
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
+                if self.usar_bomba:
+                    self.comandar_bomba(True)
                 self.estado_actual = 'BARRIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
+                modo_txt = "Bomba ACTIVADA e iniciando" if self.usar_bomba else "Iniciando (sin bomba)"
                 self.get_logger().info(
                     f"Brazo extendido (código 4). "
-                    f"Iniciando barrido: avanzando durante {self.tiempo_barrido_brazo:.1f}s con brazo extendido..."
+                    f"{modo_txt} barrido durante {self.tiempo_barrido_brazo:.1f}s..."
                 )
 
         elif self.estado_actual == 'BARRIENDO_BRAZO':
-            # El robot avanza en línea recta con el brazo extendido durante `tiempo_barrido_brazo` (2.0 s)
-            # y luego se detiene con STOP_Mov para retraer el brazo
+            # El robot avanza en línea recta con el brazo extendido (y la bomba activa si usar_bomba=True) durante `tiempo_barrido_brazo` (2.5 s)
+            # y luego detiene la bomba, envía STOP_Mov y pasa a retraer el brazo
             if tiempo_transcurrido < self.tiempo_barrido_brazo:
                 msg_vel.linear.x = self.velocidad_avance
                 self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
             else:
                 msg_vel.linear.x = 0.0
+                if self.usar_bomba or self.bomba_activa:
+                    self.comandar_bomba(False)
                 self.comandar_stop_mov()
                 self.rumbo_integral = 0.0
                 self.rumbo_suavizado = 0.0
@@ -628,7 +734,7 @@ class RealRutinaNavegacion(Node):
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
                     f"Barrido completado ({tiempo_transcurrido:.1f}s). "
-                    f"Enviando STOP_Mov y retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
+                    f"{'Bomba DETENIDA, ' if self.usar_bomba else ''}enviando STOP_Mov y retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
                 )
                 return
 
