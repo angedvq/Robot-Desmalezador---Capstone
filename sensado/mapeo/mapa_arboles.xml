@@ -6,14 +6,15 @@
                 <author>Equipo Capstone</author>
             </authors>
             <description>Mapa de árboles detectados mediante LiDAR. Coordenadas en el marco ROS odom.</description>
-            <creation_date>2026-11-24T14:38:02.428375+00:00</creation_date>
-            <last_modified>2026-11-24T14:39:23.994457+00:00</last_modified>
+            <creation_date>2026-11-26T14:04:19.452034+00:00</creation_date>
+            <last_modified>2026-11-26T14:05:38.149583+00:00</last_modified>
         </metadata>
         <coordinate_system />
         <elements>
-            <point x="1.9582" y="0.8469" />
-            <point x="3.7246" y="0.6141" />
-            <point x="5.4062" y="0.8296" />
+            <point x="1.4139" y="1.9271" />
+            <point x="2.0360" y="1.1520" />
+            <point x="3.8567" y="1.3812" />
+            <point x="5.9781" y="1.4102" />
         </elements>
     </geometric_map>
 </mdr:maps>
