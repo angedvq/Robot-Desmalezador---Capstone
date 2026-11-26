@@ -57,9 +57,9 @@ class MapirProcesadorMalezaNIR(Node):
         self.declare_parameter('roi_y_max', 0.90)
 
         # Filtros geométricos de contornos, tamaño mínimo de bounding box (5x5 cm) y área
-        self.declare_parameter('min_ancho_cm', 5.0)
-        self.declare_parameter('min_alto_cm', 5.0)
-        self.declare_parameter('px_por_cm', 16.0)  # Escala a 1280x720 (~16 px/cm -> 5 cm = 80 px)
+        self.declare_parameter('min_ancho_cm', 2.0)
+        self.declare_parameter('min_alto_cm', 2.0)
+        self.declare_parameter('px_por_cm', 10.0)  # Escala a 1280x720 (~16 px/cm -> 5 cm = 80 px)
         self.declare_parameter('area_min_px', 500)
         self.declare_parameter('area_total_min_px', 600)
         self.declare_parameter('area_max_ratio', 0.40)
