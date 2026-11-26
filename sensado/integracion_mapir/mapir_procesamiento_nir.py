@@ -50,27 +50,30 @@ class MapirProcesadorMalezaNIR(Node):
         # - 'max_canal': máximo entre canales para máxima sensibilidad NIR
         self.declare_parameter('canal_nir', 'gris')
 
-        # Región de Interés (ROI) normalizada [0.0 .. 1.0]
-        self.declare_parameter('roi_x_min', 0.10)
-        self.declare_parameter('roi_x_max', 0.90)
-        self.declare_parameter('roi_y_min', 0.10)
-        self.declare_parameter('roi_y_max', 0.90)
+        # Región de Interés (ROI): por defecto centrada y de 15x15 cm físicos
+        self.declare_parameter('roi_ancho_cm', 15.0)
+        self.declare_parameter('roi_alto_cm', 15.0)
+        self.declare_parameter('roi_x_min', 0.35)
+        self.declare_parameter('roi_x_max', 0.65)
+        self.declare_parameter('roi_y_min', 0.30)
+        self.declare_parameter('roi_y_max', 0.70)
 
-        # Filtros geométricos de contornos, tamaño mínimo de bounding box (5x5 cm) y área
-        self.declare_parameter('min_ancho_cm', 2.0)
-        self.declare_parameter('min_alto_cm', 2.0)
-        self.declare_parameter('px_por_cm', 10.0)  # Escala a 1280x720 (~16 px/cm -> 5 cm = 80 px)
-        self.declare_parameter('area_min_px', 500)
-        self.declare_parameter('area_total_min_px', 600)
-        self.declare_parameter('area_max_ratio', 0.40)
+        # Filtros geométricos de contornos, tamaño mínimo de bounding box (3x3 cm) y área
+        self.declare_parameter('min_ancho_cm', 3.0)
+        self.declare_parameter('min_alto_cm', 3.0)
+        self.declare_parameter('px_por_cm', 16.0)  # Escala a 1280x720 (~16 px/cm -> 15 cm = 240 px, 3 cm = 48 px)
+        self.declare_parameter('area_min_px', 250)
+        self.declare_parameter('area_total_min_px', 300)
+        self.declare_parameter('area_max_ratio', 0.85)
         self.declare_parameter('kernel_morfologico', 5)
 
         # Confirmación temporal (estabilidad frente a destellos aislados)
         self.declare_parameter('ventana_frames', 5)
         self.declare_parameter('frames_confirmacion', 3)
 
-        # Visualización y telemetría de calibración
+        # Visualización y telemetría de calibración (acepta mostrar_ventana:=true o gui:=true)
         self.declare_parameter('mostrar_ventana', False)
+        self.declare_parameter('gui', False)
         self.declare_parameter('log_calibracion', False)
 
         # Lectura de parámetros
@@ -81,6 +84,8 @@ class MapirProcesadorMalezaNIR(Node):
         self.delta_contraste_fondo = int(self.get_parameter('delta_contraste_fondo').value)
         self.canal_nir = str(self.get_parameter('canal_nir').value).strip().lower()
 
+        self.roi_ancho_cm = float(self.get_parameter('roi_ancho_cm').value)
+        self.roi_alto_cm = float(self.get_parameter('roi_alto_cm').value)
         self.roi_x_min = float(self.get_parameter('roi_x_min').value)
         self.roi_x_max = float(self.get_parameter('roi_x_max').value)
         self.roi_y_min = float(self.get_parameter('roi_y_min').value)
@@ -103,11 +108,13 @@ class MapirProcesadorMalezaNIR(Node):
         )
 
         tiene_display = bool(os.environ.get('DISPLAY'))
-        solicita_ventana = bool(self.get_parameter('mostrar_ventana').value)
+        solicita_ventana = bool(self.get_parameter('mostrar_ventana').value) or bool(
+            self.get_parameter('gui').value
+        )
         self.mostrar_ventana = solicita_ventana and tiene_display
         if solicita_ventana and not tiene_display:
             self.get_logger().warn(
-                "Se solicitó mostrar_ventana=True pero no hay DISPLAY activo (sesión SSH). "
+                "Se solicitó gui/mostrar_ventana=True pero no hay DISPLAY activo (sesión SSH). "
                 "Desactivando cv2.imshow para evitar caída del nodo."
             )
 
@@ -128,6 +135,7 @@ class MapirProcesadorMalezaNIR(Node):
             f"mapir_procesamiento_nir iniciado | Modo: {self.modo_umbral} | "
             f"Umbral min/fijo: {self.umbral_nir_min}/{self.umbral_nir_fijo} | "
             f"Delta fondo: +{self.delta_contraste_fondo} | "
+            f"ROI: {self.roi_ancho_cm:.0f}x{self.roi_alto_cm:.0f}cm | "
             f"BBox mín: {self.min_ancho_cm:.1f}x{self.min_alto_cm:.1f}cm "
             f"({int(self.min_ancho_cm * self.px_por_cm)}x{int(self.min_alto_cm * self.px_por_cm)}px) | "
             f"Confirmación: {self.frames_confirmacion}/{self.ventana_frames} frames"
@@ -172,11 +180,24 @@ class MapirProcesadorMalezaNIR(Node):
             self.delta_contraste_fondo = cv2.getTrackbarPos("Delta Fondo", "Mascara Maleza")
             self.area_min_px = max(50, cv2.getTrackbarPos("Area Min", "Mascara Maleza"))
 
-        # 1. Recorte de la Región de Interés (ROI)
-        x1 = int(np.clip(self.roi_x_min * ancho, 0, ancho - 1))
-        x2 = int(np.clip(self.roi_x_max * ancho, x1 + 1, ancho))
-        y1 = int(np.clip(self.roi_y_min * alto, 0, alto - 1))
-        y2 = int(np.clip(self.roi_y_max * alto, y1 + 1, alto))
+        # Escalar px_por_cm proporcionalmente si la resolución difiere de 1280 de ancho
+        px_por_cm_efectivo = self.px_por_cm * (float(ancho) / 1280.0)
+
+        # 1. Recorte de la Región de Interés (ROI de 15x15 cm centrada)
+        if self.roi_ancho_cm > 0.0 and self.roi_alto_cm > 0.0:
+            roi_w_px = min(ancho, int(round(self.roi_ancho_cm * px_por_cm_efectivo)))
+            roi_h_px = min(alto, int(round(self.roi_alto_cm * px_por_cm_efectivo)))
+            cx = ancho // 2
+            cy = alto // 2
+            x1 = max(0, cx - roi_w_px // 2)
+            x2 = min(ancho, x1 + roi_w_px)
+            y1 = max(0, cy - roi_h_px // 2)
+            y2 = min(alto, y1 + roi_h_px)
+        else:
+            x1 = int(np.clip(self.roi_x_min * ancho, 0, ancho - 1))
+            x2 = int(np.clip(self.roi_x_max * ancho, x1 + 1, ancho))
+            y1 = int(np.clip(self.roi_y_min * alto, 0, alto - 1))
+            y2 = int(np.clip(self.roi_y_max * alto, y1 + 1, alto))
 
         roi_bgr = cv_image[y1:y2, x1:x2]
         roi_area = float((x2 - x1) * (y2 - y1))
@@ -186,7 +207,11 @@ class MapirProcesadorMalezaNIR(Node):
         nir_suave = cv2.GaussianBlur(nir_raw, (5, 5), 0)
 
         # 3. Estadísticos de la escena para calibración / umbral dinámico
-        fondo_mediana = float(np.median(nir_suave))
+        # Como el ROI de 15x15 cm es pequeño, si una maleza cubre >50% del ROI la mediana
+        # del ROI subiría al brillo de la hoja. Usamos el mínimo entre el percentil 25 del ROI
+        # y la mediana global de la imagen para que la referencia sea siempre el suelo.
+        nir_global = self._extraer_canal_nir(cv_image)
+        fondo_mediana = float(min(np.percentile(nir_suave, 25), np.median(nir_global)))
         p95_nir = float(np.percentile(nir_suave, 95))
 
         if self.modo_umbral == 'fijo':
@@ -207,11 +232,9 @@ class MapirProcesadorMalezaNIR(Node):
         mascara_limpia = cv2.morphologyEx(mascara_brillante, cv2.MORPH_OPEN, self.kernel)
         mascara_limpia = cv2.morphologyEx(mascara_limpia, cv2.MORPH_CLOSE, self.kernel)
 
-        # 5. Búsqueda y filtrado geométrico de contornos de maleza (mínimo 5x5 cm de bounding box)
+        # 5. Búsqueda y filtrado geométrico de contornos de maleza (mínimo 3 cm de ancho y 3 cm de alto)
         contornos, _ = cv2.findContours(mascara_limpia, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Escalar px_por_cm proporcionalmente si la resolución difiere de 1280 de ancho
-        px_por_cm_efectivo = self.px_por_cm * (float(ancho) / 1280.0)
         min_ancho_px = int(round(self.min_ancho_cm * px_por_cm_efectivo))
         min_alto_px = int(round(self.min_alto_cm * px_por_cm_efectivo))
 
@@ -219,17 +242,32 @@ class MapirProcesadorMalezaNIR(Node):
         area_maleza_total = 0.0
         num_manchas_validas = 0
 
-        # Dibujar recuadro de la ROI en la imagen de diagnóstico
+        # Dibujar recuadro de la ROI (15x15 cm) en la imagen de diagnóstico
         vista_debug = cv_image.copy()
         cv2.rectangle(vista_debug, (x1, y1), (x2, y2), (255, 200, 0), 2)
+        cv2.putText(
+            vista_debug,
+            f"ROI {self.roi_ancho_cm:.0f}x{self.roi_alto_cm:.0f}cm",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 200, 0),
+            2,
+        )
 
         for contorno in contornos:
             area = cv2.contourArea(contorno)
             bx, by, bw, bh = cv2.boundingRect(contorno)
+            if bw < 10 or bh < 10:
+                continue
+
+            ancho_cm = bw / px_por_cm_efectivo
+            alto_cm = bh / px_por_cm_efectivo
+            gx, gy = x1 + bx, y1 + by
 
             # Condición de tamaño mínimo: tanto el ancho como el alto del bounding box
-            # deben ser de al menos min_ancho_cm x min_alto_cm (por defecto 5.0 cm x 5.0 cm),
-            # además de cumplir el rango de área válida.
+            # deben ser de al menos min_ancho_cm x min_alto_cm (por defecto 3.0 cm x 3.0 cm,
+            # sin exigir que sea cuadrada), además de cumplir el rango de área válida.
             cumple_bbox_minimo = (bw >= min_ancho_px) and (bh >= min_alto_px)
             cumple_area = self.area_min_px < area < area_max_permitida
 
@@ -237,23 +275,31 @@ class MapirProcesadorMalezaNIR(Node):
                 area_maleza_total += area
                 num_manchas_validas += 1
 
-                ancho_cm = bw / px_por_cm_efectivo
-                alto_cm = bh / px_por_cm_efectivo
-
-                # Coordenadas globales en la imagen completa
-                gx, gy = x1 + bx, y1 + by
-                cv2.rectangle(vista_debug, (gx, gy), (gx + bw, gy + bh), (0, 255, 0), 2)
+                # Nuevo bounding box verde para cada maleza válida detectada dentro del ROI
+                cv2.rectangle(vista_debug, (gx, gy), (gx + bw, gy + bh), (0, 255, 0), 3)
                 cv2.putText(
                     vista_debug,
-                    f"Maleza {ancho_cm:.1f}x{alto_cm:.1f}cm",
+                    f"MALEZA {ancho_cm:.1f}x{alto_cm:.1f}cm",
                     (gx, max(20, gy - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
                     (0, 255, 0),
                     2,
                 )
+            elif area >= 80:
+                # Contorno descartado por no alcanzar el mínimo de 3x3 cm (en naranjo delgado)
+                cv2.rectangle(vista_debug, (gx, gy), (gx + bw, gy + bh), (0, 140, 255), 1)
+                cv2.putText(
+                    vista_debug,
+                    f"<{self.min_ancho_cm:.0f}cm ({ancho_cm:.1f}x{alto_cm:.1f}cm)",
+                    (gx, max(20, gy - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 140, 255),
+                    1,
+                )
 
-        # Si al menos un bounding box superó el tamaño mínimo (5x5 cm), es válido en este frame
+        # Si al menos un bounding box superó el tamaño mínimo (3x3 cm), es válido en este frame
         maleza_frame_actual = num_manchas_validas > 0
         self.historial_deteccion.append(maleza_frame_actual)
 

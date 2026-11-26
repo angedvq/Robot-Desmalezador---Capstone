@@ -38,18 +38,22 @@ class MapirCalibrador(Node):
     def __init__(self):
         super().__init__('mapir_calibrador')
 
-        self.declare_parameter('roi_x_min', 0.10)
-        self.declare_parameter('roi_x_max', 0.90)
-        self.declare_parameter('roi_y_min', 0.10)
-        self.declare_parameter('roi_y_max', 0.90)
+        self.declare_parameter('roi_ancho_cm', 15.0)
+        self.declare_parameter('roi_alto_cm', 15.0)
+        self.declare_parameter('roi_x_min', 0.35)
+        self.declare_parameter('roi_x_max', 0.65)
+        self.declare_parameter('roi_y_min', 0.30)
+        self.declare_parameter('roi_y_max', 0.70)
         self.declare_parameter('canal_nir', 'gris')
-        self.declare_parameter('min_ancho_cm', 5.0)
-        self.declare_parameter('min_alto_cm', 5.0)
+        self.declare_parameter('min_ancho_cm', 3.0)
+        self.declare_parameter('min_alto_cm', 3.0)
         self.declare_parameter('px_por_cm', 16.0)
-        self.declare_parameter('area_min_px', 500)
-        self.declare_parameter('area_max_ratio', 0.40)
+        self.declare_parameter('area_min_px', 250)
+        self.declare_parameter('area_max_ratio', 0.85)
         self.declare_parameter('gui', _detectar_flag_gui_cli())
 
+        self.roi_ancho_cm = float(self.get_parameter('roi_ancho_cm').value)
+        self.roi_alto_cm = float(self.get_parameter('roi_alto_cm').value)
         self.roi_x_min = float(self.get_parameter('roi_x_min').value)
         self.roi_x_max = float(self.get_parameter('roi_x_max').value)
         self.roi_y_min = float(self.get_parameter('roi_y_min').value)
@@ -93,24 +97,41 @@ class MapirCalibrador(Node):
         if alto == 0 or ancho == 0:
             return
 
-        x1 = int(np.clip(self.roi_x_min * ancho, 0, ancho - 1))
-        x2 = int(np.clip(self.roi_x_max * ancho, x1 + 1, ancho))
-        y1 = int(np.clip(self.roi_y_min * alto, 0, alto - 1))
-        y2 = int(np.clip(self.roi_y_max * alto, y1 + 1, alto))
+        px_por_cm_efectivo = self.px_por_cm * (float(ancho) / 1280.0)
+        if self.roi_ancho_cm > 0.0 and self.roi_alto_cm > 0.0:
+            roi_w_px = min(ancho, int(round(self.roi_ancho_cm * px_por_cm_efectivo)))
+            roi_h_px = min(alto, int(round(self.roi_alto_cm * px_por_cm_efectivo)))
+            cx = ancho // 2
+            cy = alto // 2
+            x1 = max(0, cx - roi_w_px // 2)
+            x2 = min(ancho, x1 + roi_w_px)
+            y1 = max(0, cy - roi_h_px // 2)
+            y2 = min(alto, y1 + roi_h_px)
+        else:
+            x1 = int(np.clip(self.roi_x_min * ancho, 0, ancho - 1))
+            x2 = int(np.clip(self.roi_x_max * ancho, x1 + 1, ancho))
+            y1 = int(np.clip(self.roi_y_min * alto, 0, alto - 1))
+            y2 = int(np.clip(self.roi_y_max * alto, y1 + 1, alto))
 
         roi = cv_image[y1:y2, x1:x2]
         roi_area = float((x2 - x1) * (y2 - y1))
 
         if self.canal_nir == 'rojo_nir':
             nir = roi[:, :, 2]
+            nir_global = cv_image[:, :, 2]
         elif self.canal_nir == 'max_canal':
             nir = np.max(roi, axis=2)
+            nir_global = np.max(cv_image, axis=2)
         else:
             nir = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            nir_global = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
 
         nir_suave = cv2.GaussianBlur(nir, (5, 5), 0)
 
-        mediana = float(np.median(nir_suave))
+        # Si una maleza cubre >50% del ROI de 15x15 cm, la mediana simple del ROI subiría
+        # al valor de la hoja; anclamos la referencia del suelo al mínimo entre P25 del ROI
+        # y la mediana global de la imagen.
+        mediana = float(min(np.percentile(nir_suave, 25), np.median(nir_global)))
         p90 = float(np.percentile(nir_suave, 90))
         p95 = float(np.percentile(nir_suave, 95))
         p99 = float(np.percentile(nir_suave, 99))
@@ -135,48 +156,57 @@ class MapirCalibrador(Node):
 
         contornos, _ = cv2.findContours(mascara_limpia, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        px_por_cm_efectivo = self.px_por_cm * (float(ancho) / 1280.0)
         min_ancho_px = int(round(self.min_ancho_cm * px_por_cm_efectivo))
         min_alto_px = int(round(self.min_alto_cm * px_por_cm_efectivo))
         area_max_permitida = roi_area * self.area_max_ratio
 
         vista_cal = cv_image.copy()
-        # Recuadro de la ROI en celeste/amarillo
+        # Recuadro de la ROI (15x15 cm) en celeste/amarillo
         cv2.rectangle(vista_cal, (x1, y1), (x2, y2), (255, 200, 0), 2)
+        cv2.putText(
+            vista_cal,
+            f"ROI {self.roi_ancho_cm:.0f}x{self.roi_alto_cm:.0f}cm",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 200, 0),
+            2,
+        )
 
         num_bboxes_validos = 0
         for contorno in contornos:
             area = cv2.contourArea(contorno)
             bx, by, bw, bh = cv2.boundingRect(contorno)
-            if bw < 15 or bh < 15:
+            if bw < 10 or bh < 10:
                 continue
 
             ancho_cm = bw / px_por_cm_efectivo
             alto_cm = bh / px_por_cm_efectivo
             gx, gy = x1 + bx, y1 + by
 
+            # Condición de tamaño mínimo: ancho >= 3 cm Y alto >= 3 cm (no necesita ser cuadrada)
             cumple_bbox = (bw >= min_ancho_px) and (bh >= min_alto_px)
             cumple_area = self.area_min_px < area < area_max_permitida
 
             if cumple_bbox and cumple_area:
                 num_bboxes_validos += 1
-                # Bounding box válido (>= 5x5 cm) en verde
-                cv2.rectangle(vista_cal, (gx, gy), (gx + bw, gy + bh), (0, 255, 0), 2)
+                # Nuevo bounding box válido (>= 3x3 cm) en verde intenso dentro del ROI
+                cv2.rectangle(vista_cal, (gx, gy), (gx + bw, gy + bh), (0, 255, 0), 3)
                 cv2.putText(
                     vista_cal,
-                    f"Maleza {ancho_cm:.1f}x{alto_cm:.1f}cm ({int(area)}px)",
+                    f"MALEZA {ancho_cm:.1f}x{alto_cm:.1f}cm ({int(area)}px)",
                     (gx, max(22, gy - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
                     (0, 255, 0),
                     2,
                 )
-            elif area >= 150:
-                # Contorno detectado pero descartado por ser menor a 5x5 cm (en naranjo punteado/fino)
+            elif area >= 80:
+                # Contorno detectado pero descartado por tener ancho o alto menor a 3 cm
                 cv2.rectangle(vista_cal, (gx, gy), (gx + bw, gy + bh), (0, 140, 255), 1)
                 cv2.putText(
                     vista_cal,
-                    f"<5cm ({ancho_cm:.1f}x{alto_cm:.1f}cm)",
+                    f"<{self.min_ancho_cm:.0f}cm ({ancho_cm:.1f}x{alto_cm:.1f}cm)",
                     (gx, max(22, gy - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
@@ -188,7 +218,7 @@ class MapirCalibrador(Node):
         color_titulo = (0, 255, 0) if num_bboxes_validos > 0 else (0, 215, 255)
         cv2.putText(
             vista_cal,
-            f"CALIBRADOR MAPIR | Malezas validas (>=5x5cm): {num_bboxes_validos}",
+            f"CALIBRADOR MAPIR | Malezas validas (>={self.min_ancho_cm:.0f}x{self.min_alto_cm:.0f}cm): {num_bboxes_validos}",
             (15, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.75,
@@ -224,7 +254,7 @@ class MapirCalibrador(Node):
         self.get_logger().info(
             f"\n--- [CALIBRACIÓN MAPIR - {estado_escena}] ---\n"
             f"  Intensidad NIR -> Mediana(fondo): {mediana:.1f} | P90: {p90:.1f} | "
-            f"P95: {p95:.1f} | P99: {p99:.1f} | Máx: {max_val} | BBoxes >=5x5cm: {num_bboxes_validos}\n"
+            f"P95: {p95:.1f} | P99: {p99:.1f} | Máx: {max_val} | BBoxes >={self.min_ancho_cm:.0f}x{self.min_alto_cm:.0f}cm: {num_bboxes_validos}\n"
             f"  Parámetros recomendados:\n"
             f"    umbral_nir_min:={umbral_sugerido}  umbral_nir_fijo:={umbral_sugerido}  "
             f"delta_contraste_fondo:={delta_sugerido}",
