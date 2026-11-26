@@ -26,7 +26,7 @@ STOP_ALL = 9        # Detiene todo: ruedas, stepper y bomba
 START_MOV = 10      # Inicia movimiento (m/s), fija rumbo actual como 0° y enciende IMU
 STOP_MOV = 11       # Detiene solo las ruedas, mantiene rumbo actual y apaga IMU
 
-# Códigos recibidos desde la STM32 (2 bytes: [codigo, codigo ^ 0xA5])
+# Códigos recibidos desde la STM32 
 BRAZO_RETRAIDO = 3   # Brazo totalmente retraído (Brazo home)
 BRAZO_EXTENDIDO = 4  # Brazo totalmente extendido (Brazo end)
 
@@ -34,13 +34,13 @@ MENSAJES_STM32 = {
     0: "Error de comunicación",
     1: "Caída de voltaje",
     2: "Fallo bomba",
-    BRAZO_RETRAIDO: "Brazo totalmente retraído (Brazo home)",
-    BRAZO_EXTENDIDO: "Brazo totalmente extendido (Brazo end)",
+    BRAZO_RETRAIDO: "Brazo totalmente retraído",
+    BRAZO_EXTENDIDO: "Brazo totalmente extendido",
 }
 
 
 def trama(orden: int, valor: float = 0.0) -> bytes:
-    '''Convierte una orden y un numero decimal en un paquete de 4 bytes segun el protocolo de comunicacion'''
+    """Convierte una orden y un numero decimal en un paquete de 4 bytes segun el protocolo de comunicacion."""
     raw = max(-32767, min(32767, round(float(valor) * 100.0)))
     cuerpo = struct.pack('<Bh', int(orden), int(raw))
     chk = cuerpo[0] ^ cuerpo[1] ^ cuerpo[2] ^ 0xA5
@@ -58,7 +58,7 @@ class RealSTM32Bridge(Node):
         baudrate = int(self.get_parameter('baudrate').value)
         self.uart = serial.Serial(port, baudrate, timeout=0.0)
 
-        # Buffer de recepción para tramas de error 
+        # Buffer de recepción para tramas de estado/error
         self.rx_buf = bytearray()
 
         # Estado interno
@@ -71,17 +71,16 @@ class RealSTM32Bridge(Node):
         self.primer_arranque = True
 
         # Cola FIFO de órdenes pendientes prioritarias
-        # Al iniciar el nodo, nos aseguramos de que todo esté detenido y la IMU quede inicializada en 0.0°.
-        # deque() permite enviar tareas de forma consecutiva y ordenada para no saturar el puerto serial
         self.pendientes = deque([
             (STOP_ALL, 0.0),
             (RESET_TRACKING, 0.0),
             (SET_HEADING, 0.0),
         ])
 
-        # Suscriptores 
+        # Suscriptores
         self.create_subscription(Twist, '/cmd_vel', self.recibir_velocidad, 10)
         self.create_subscription(Bool, '/navegacion/stop', self.recibir_stop, 10)
+        self.create_subscription(Bool, '/navegacion/stop_mov', self.recibir_stop_mov, 10)
         self.create_subscription(Float32, '/navegacion/corregir_grados', self.recibir_correccion, 10)
         self.create_subscription(Bool, '/bomba', self.recibir_bomba, 10)
         self.create_subscription(Float32, '/brazo_mm', self.recibir_brazo, 10)
@@ -89,11 +88,10 @@ class RealSTM32Bridge(Node):
         # Publicador de confirmaciones del brazo desde la STM32 (3 = retraído, 4 = extendido)
         self.pub_estado_brazo = self.create_publisher(Int32, '/stm32/estado_brazo', 10)
 
-        self.create_timer(0.05, self.enviar_pendiente) 
+        self.create_timer(0.05, self.enviar_pendiente)
 
         self.get_logger().info(
-            f"real_stm32_bridge iniciado en {port} ({baudrate} bps) | "
-            "Soporte STOP_Mov (árboles/brazo) + STOP_All (emergencia)"
+            f"real_stm32_bridge iniciado en {port} ({baudrate} bps)"
         )
 
     # =========================================================================
@@ -101,15 +99,42 @@ class RealSTM32Bridge(Node):
     # =========================================================================
     def recibir_velocidad(self, msg: Twist):
         """Actualiza la velocidad lineal de referencia recibida en /cmd_vel."""
-        self.velocidad = float(msg.linear.x)
+        nueva_vel = float(msg.linear.x)
+        cambio_vel = abs(nueva_vel - self.velocidad) >= 0.01
+        self.velocidad = nueva_vel
         self.ultimo_cmd = time.monotonic()
 
+        # Si recibe velocidad 0.0 mientras estaba en movimiento, encolar STOP_MOV inmediatamente
+        if abs(nueva_vel) < 1e-4 and self.en_movimiento:
+            self._detener_movimiento_ruedas()
+        # Si ya está en movimiento y la rutina cambia de régimen de velocidad
+        # (ej. 0.20 m/s <-> 0.065 m/s durante corrección de ángulo grande),
+        # encolar SET_VEL de inmediato para no esperar a que se vacíe la cola de SET_HEADING.
+        elif self.en_movimiento and not self.stop_solicitado and abs(nueva_vel) >= 1e-4 and cambio_vel:
+            self.pendientes.appendleft((SET_VEL, self.velocidad))
+
+    def _detener_movimiento_ruedas(self):
+        """Encola STOP_MOV + STOP_TRACKING + RESET_TRACKING al frente para frenar las ruedas de inmediato."""
+        self.velocidad = 0.0
+        self.en_movimiento = False
+        self.ultimo_rumbo = 0.0
+        ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
+        self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
+        self.pendientes.appendleft((RESET_TRACKING, 0.0))
+        self.pendientes.appendleft((STOP_TRACKING, 0.0))
+        self.pendientes.appendleft((STOP_MOV, 0.0))
+
+    def recibir_stop_mov(self, msg: Bool):
+        """Recibe orden explícita /navegacion/stop_mov para enviar STOP_MOV (Orden 11) a la STM32."""
+        self.ultimo_cmd = time.monotonic()
+        if bool(msg.data):
+            self._detener_movimiento_ruedas()
+
     def recibir_stop(self, msg: Bool):
-        """Recibe bandera de parada total /navegacion/stop"""
+        """Recibe bandera de parada total /navegacion/stop."""
         nuevo_stop = bool(msg.data)
         self.ultimo_cmd = time.monotonic()
 
-        # Si se activa el STOP de emergencia, encolar STOP_All al frente
         if nuevo_stop and not self.stop_solicitado:
             self.velocidad = 0.0
             self.en_movimiento = False
@@ -119,9 +144,7 @@ class RealSTM32Bridge(Node):
         self.stop_solicitado = nuevo_stop
 
     def recibir_correccion(self, msg: Float32):
-        """ Recibe el rumbo objetivo desde /navegacion/corregir_grados"""
-
-        # max de 180° para no saturar
+        """Recibe el rumbo objetivo desde /navegacion/corregir_grados."""
         self.ultimo_rumbo = max(-180.0, min(180.0, float(msg.data)))
         self.ultimo_cmd = time.monotonic()
 
@@ -129,14 +152,14 @@ class RealSTM32Bridge(Node):
             self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
 
     def recibir_bomba(self, msg: Bool):
-        """Enciende o apaga la bomba (falta implementar la MAPIR)"""
+        """Enciende o apaga la bomba."""
         self.bomba_encendida = bool(msg.data)
         self.ultimo_cmd = time.monotonic()
         self.pendientes.append((START_BOMBA if self.bomba_encendida else STOP_BOMBA, 0.0))
 
     def recibir_brazo(self, msg: Float32):
         """
-        Recibe orden de movimiento del brazo desde /brazo_mm y la convierte a centímetros 
+        Recibe orden de movimiento del brazo desde /brazo_mm y la convierte a centímetros:
         - Valor positivo (+X mm -> +X/10 cm): Extiende el brazo hasta fin de carrera.
         - Valor negativo (-X mm -> -X/10 cm): Retrae el brazo hasta fin de carrera.
         - Valor 0.0: Envía `STOP_Stepper` (Orden 6).
@@ -144,7 +167,6 @@ class RealSTM32Bridge(Node):
         self.ultimo_cmd = time.monotonic()
         desplazamiento_mm = float(msg.data)
 
-        # Si el valor de extension del brazo se acerca a 0, abortar movimiento
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
         else:
@@ -160,10 +182,10 @@ class RealSTM32Bridge(Node):
     # =========================================================================
     def _leer_mensajes_stm32(self):
         """
-        Lee paquetes de 2 bytes enviados desde la STM32 ([codigo, codigo ^ 0xA5]):
-        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All internamente).
-        - 3: Brazo totalmente retraído (Brazo home).
-        - 4: Brazo totalmente extendido (Brazo end).
+        Lee paquetes de 2 bytes enviados desde la STM32:
+        - 0, 1, 2: Errores de la STM32 (ejecuta STOP_All).
+        - 3: Brazo totalmente retraído.
+        - 4: Brazo totalmente extendido.
         """
         try:
             waiting = self.uart.in_waiting
@@ -174,7 +196,6 @@ class RealSTM32Bridge(Node):
 
         while len(self.rx_buf) >= 2:
             b0, b1 = self.rx_buf[0], self.rx_buf[1]
-            print(b0,b1)
             if (b0 ^ 0xA5) == b1 and b0 in MENSAJES_STM32:
                 if b0 in (BRAZO_RETRAIDO, BRAZO_EXTENDIDO):
                     self.get_logger().info(
@@ -188,10 +209,8 @@ class RealSTM32Bridge(Node):
                         f"[STM32 -> RPi] Error ({b0}): {MENSAJES_STM32[b0]} (STOP_All)"
                     )
                 del self.rx_buf[:2]
-                #print(b0)
             else:
                 del self.rx_buf[:1]
-                #print("error catastrofico")
 
     # =========================================================================
     # Loop principal
@@ -199,7 +218,7 @@ class RealSTM32Bridge(Node):
     def enviar_pendiente(self):
         self._leer_mensajes_stm32()
 
-        # Watchdog: Si dejan de llegar comandos de ROS (> 0.5 s), detener todo
+        # Watchdog: Si dejan de llegar comandos de ROS (> 0.6 s), detener todo
         sin_comandos = (self.ultimo_cmd > 0.0 and (time.monotonic() - self.ultimo_cmd) > 0.6)
 
         if sin_comandos:
@@ -218,21 +237,12 @@ class RealSTM32Bridge(Node):
             orden, valor = (self.pendientes.popleft() if self.pendientes else (STOP_ALL, 0.0))
 
         # ---------------------------------------------------------------------
-        # Parada de movimiento frente un árbol
+        # Parada de movimiento frente a un árbol
         # ---------------------------------------------------------------------
         elif abs(self.velocidad) < 1e-4:
             if self.en_movimiento:
-                self.en_movimiento = False
-                self.ultimo_rumbo = 0.0
+                self._detener_movimiento_ruedas()
 
-                # Eliminar órdenes de avance pendientes pero conservar órdenes de brazo/bomba
-                ordenes_mov = (SET_VEL, SET_HEADING, START_TRACKING, START_MOV)
-                self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in ordenes_mov)
-                self.pendientes.appendleft((RESET_TRACKING, 0.0))
-                self.pendientes.appendleft((STOP_TRACKING, 0.0))
-                self.pendientes.appendleft((STOP_MOV, 0.0))
-
-            # Si hay órdenes en cola las enviamos; si la cola está vacía, mantenemos STOP_Mov
             orden, valor = (self.pendientes.popleft() if self.pendientes else (STOP_MOV, 0.0))
 
         # ---------------------------------------------------------------------
@@ -242,8 +252,6 @@ class RealSTM32Bridge(Node):
             if not self.en_movimiento:
                 self.en_movimiento = True
                 self.primer_arranque = False
-                # Llamar a START_MOV al reanudar tras cada árbol porque es la única
-                # orden del firmware STM32 que llama a UNBLOCK_Heading().
                 self.pendientes.append((START_MOV, self.velocidad))
                 self.pendientes.append((SET_HEADING, self.ultimo_rumbo))
 

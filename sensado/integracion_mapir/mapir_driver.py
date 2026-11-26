@@ -9,12 +9,17 @@ Características principales:
 2. Minimización de latencia (buffer size = 1): evita acumular frames antiguos en el buffer de
    OpenCV/V4L2 para que, cuando el robot se detenga frente a un tronco, la imagen evaluada
    corresponda exactamente al instante actual.
-3. Reconexión automática ante micro-cortes USB.
+3. Bloqueo de Auto-Exposición y Balance de Blancos (`bloquear_auto_exposicion`):
+   Permite congelar la exposición de la cámara tras los primeros frames de adaptación a la luz
+   ambiente o exactamente en el instante en que se calibra con el panel de reflectancia MAPIR
+   (`/mapir/bloquear_exposicion`), evitando que la cámara cambie el brillo sola durante la rutina.
+4. Reconexión automática ante micro-cortes USB.
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 import cv2
 
@@ -31,19 +36,28 @@ class MapirDriverReal(Node):
         self.declare_parameter('frame_height', 720)
         self.declare_parameter('fps', 15.0)
         self.declare_parameter('auto_detect_port', True)
+        self.declare_parameter('bloquear_auto_exposicion', True)
+        self.declare_parameter('exposicion_fija', -1.0)  # Si > 0, fija ese valor manual desde el inicio
 
         self.puerto_preferido = int(self.get_parameter('video_port').value)
         self.frame_width = int(self.get_parameter('frame_width').value)
         self.frame_height = int(self.get_parameter('frame_height').value)
         self.fps = max(1.0, float(self.get_parameter('fps').value))
         self.auto_detect_port = bool(self.get_parameter('auto_detect_port').value)
+        self.bloquear_auto_exposicion = bool(self.get_parameter('bloquear_auto_exposicion').value)
+        self.exposicion_fija = float(self.get_parameter('exposicion_fija').value)
 
         self.publisher_ = self.create_publisher(Image, '/image_raw', 10)
+        self.sub_lock = self.create_subscription(
+            Bool, '/mapir/bloquear_exposicion', self._bloquear_exposicion_callback, 10
+        )
         self.bridge = CvBridge()
 
         self.cap = None
         self.puerto_activo = None
         self.fallos_consecutivos = 0
+        self.frames_capturados = 0
+        self.exposicion_bloqueada = False
 
         # Abrir cámara MAPIR al iniciar
         self._conectar_camara()
@@ -51,6 +65,47 @@ class MapirDriverReal(Node):
         # Temporizador de captura según los FPS configurados
         periodo = 1.0 / self.fps
         self.timer = self.create_timer(periodo, self.timer_callback)
+
+    def _aplicar_bloqueo_exposicion(self, motivo: str = ""):
+        """
+        Congela la auto-exposición (V4L2_EXPOSURE_MANUAL = 1) y el auto-balance de blancos
+        en el estado actual de la cámara para que la ganancia no varíe durante el recorrido.
+        """
+        if self.cap is None or not self.cap.isOpened():
+            return
+        try:
+            exp_actual = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+            # En V4L2: 1 = Manual Mode, 3 = Aperture Priority (Auto)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            if self.exposicion_fija > 0.0:
+                self.cap.set(cv2.CAP_PROP_EXPOSURE, self.exposicion_fija)
+            elif exp_actual > 0.0:
+                self.cap.set(cv2.CAP_PROP_EXPOSURE, exp_actual)
+
+            # Desactivar balance de blancos automático si el driver V4L2 lo soporta
+            self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+            self.exposicion_bloqueada = True
+            self.get_logger().info(
+                f"[MAPIR Driver] Auto-exposición y Auto-WB BLOQUEADOS ({motivo}) | "
+                f"Exposición fijada: {self.cap.get(cv2.CAP_PROP_EXPOSURE):.1f}"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"No se pudo bloquear auto-exposición V4L2: {e}")
+
+    def _bloquear_exposicion_callback(self, msg: Bool):
+        """Permite bloquear (True) o liberar (False) la auto-exposición desde el nodo calibrador."""
+        if self.cap is None or not self.cap.isOpened():
+            return
+        if bool(msg.data):
+            self._aplicar_bloqueo_exposicion(motivo="calibración con panel MAPIR completada")
+        else:
+            try:
+                # 3 = Auto Exposure en V4L2
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                self.exposicion_bloqueada = False
+                self.get_logger().info("[MAPIR Driver] Auto-exposición reactivada para re-calibrar.")
+            except Exception:
+                pass
 
     def _intentar_abrir_puerto(self, indice: int):
         """Intenta abrir `/dev/video{indice}` con V4L2 y verifica que entregue un frame válido."""
@@ -93,6 +148,8 @@ class MapirDriverReal(Node):
                 self.cap = cap
                 self.puerto_activo = idx
                 self.fallos_consecutivos = 0
+                self.frames_capturados = 0
+                self.exposicion_bloqueada = False
                 ancho_real = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 alto_real = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 self.get_logger().info(
@@ -115,6 +172,18 @@ class MapirDriverReal(Node):
         ret, frame = self.cap.read()
         if ret and frame is not None:
             self.fallos_consecutivos = 0
+            self.frames_capturados += 1
+
+            # Si bloquear_auto_exposicion está activo, dejamos que la cámara se adapte a la luz
+            # del lugar durante los primeros 20 frames (~1.3 s) y luego congelamos la exposición.
+            # Si luego se calibra con el panel QR, se vuelve a fijar en ese instante.
+            if (
+                self.bloquear_auto_exposicion
+                and not self.exposicion_bloqueada
+                and self.frames_capturados == 20
+            ):
+                self._aplicar_bloqueo_exposicion(motivo="estabilización inicial de 20 frames")
+
             msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = 'mapir_link'
