@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mdr:maps xmlns:mdr="http://www.example.org/mdr">
+    <geometric_map id="MapaArboles" maptype="2">
+        <metadata>
+            <authors>
+                <author>Equipo Capstone</author>
+            </authors>
+            <description>Mapa de árboles detectados mediante LiDAR. Coordenadas en el marco ROS odom.</description>
+            <creation_date>2026-11-24T14:38:02.428375+00:00</creation_date>
+            <last_modified>2026-11-24T14:39:23.994457+00:00</last_modified>
+        </metadata>
+        <coordinate_system />
+        <elements>
+            <point x="1.9582" y="0.8469" />
+            <point x="3.7246" y="0.6141" />
+            <point x="5.4062" y="0.8296" />
+        </elements>
+    </geometric_map>
+</mdr:maps>

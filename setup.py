@@ -52,6 +52,9 @@ setup(
             'mapir_procesamiento_nir = sensado.integracion_mapir.mapir_procesamiento_nir:main',
             'mapir_calibrador = sensado.integracion_mapir.mapir_calibrador:main',
             'mapir_rutina_navegacion = sensado.integracion_mapir.mapir_rutina_navegacion:main',
+            'odometria = sensado.mapeo.odometria:main',
+            'mapas_ieee1873 = sensado.mapeo.mapas_ieee1873:main',
+            'visualizar_mapa = sensado.mapeo.visualizar_mapa:main',
         ],
     },
 )

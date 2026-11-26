@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
 Nodo de control autónomo de navegación por hilera de árboles con inspección de maleza
-mediante cámara MAPIR (`mapir_rutina_navegacion.py`).
-
-Copia adaptada de `sensado/real_rutina_navegacion.py` ubicada en `sensado/integracion_mapir/`
-para mantener intacta la rutina original sin cámara.
+mediante cámara MAPIR y modo de barrido del brazo (`mapir_rutina_navegacion.py`).
 
 Flujo de la máquina de estados:
 1. `AVANZANDO`:
-   Avanza en línea recta buscando troncos con el RPLidar A1 (`/arboles_detectados`) y
-   vigilando obstáculos frontales con el TF-Mini.
-2. `ALINEANDO_BRAZO`:
-   Al detectar un tronco, sigue avanzando durante `tiempo_delay_brazo` (1.5 s) para que la
-   parte trasera del robot (cámara MAPIR y brazo) quede alineada frente al tronco, y se detiene.
-3. `VERIFICANDO_MALEZA`:
-   Con el robot detenido frente al tronco, consulta durante `tiempo_verificacion_maleza` (2.0 s)
-   el tópico `/rutina/maleza_detectada` publicado por `mapir_procesamiento_nir`:
-   - Si y solo si hay maleza: pasa a `EXTENDIENDO_BRAZO` (+600 mm, espera código 4 de STM32) ->
-     `MANTENIENDO_BRAZO` (4.0 s detenido con brazo extendido) -> `RETRAYENDO_BRAZO` (-600 mm,
-     espera código 3 de STM32) -> `ENFRIAMIENTO` (o `FINALIZADO`).
+   Avanza corrigiendo rumbo con control PID (`kp=30`, `ki=5`, `kd=5`) y ajuste dinámico
+   de velocidad (`0.20 m/s` normal / `0.065 m/s` si el ángulo a corregir es >= 18°),
+   buscando troncos con el RPLidar A1 (`/arboles_detectados`) a `distancia_meta = 0.85 m`.
+2. `VERIFICANDO_MALEZA`:
+   Al detectar un tronco a la altura del LiDAR, envía `STOP_Mov` inmediatamente para detener
+   las ruedas y consulta durante `tiempo_verificacion_maleza` (2.0 s) el tópico
+   `/rutina/maleza_detectada` publicado por `mapir_procesamiento_nir`:
+   - Si y solo si la cámara MAPIR detecta maleza: activa el barrido del brazo pasando a
+     `EXTENDIENDO_BRAZO` (+600 mm, espera código 4 de STM32) -> `BARRIENDO_BRAZO` (avanza
+     durante `tiempo_barrido_brazo` = 2.5 s con el brazo extendido y luego envía `STOP_Mov`) ->
+     `RETRAYENDO_BRAZO` (-600 mm, espera código 3 de STM32) -> `ENFRIAMIENTO` (o `FINALIZADO`).
    - Si NO hay maleza: NO acciona el brazo y pasa directamente a `ENFRIAMIENTO` (o `FINALIZADO`
      si ya alcanzó `meta_arboles`) para continuar hacia el siguiente tronco.
 """
@@ -42,30 +39,31 @@ class MapirRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         # Declaración de parámetros
         # ---------------------------------------------------------------------
-        # Parámetros geométricos y de avance
-        self.declare_parameter('distancia_meta', 0.70)        # Distancia a la hilera (m)
-        self.declare_parameter('distancia_frenado', 0.50)     # Umbral obstáculo TF-Mini (m)
-        self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal habitual (m/s)
-        self.declare_parameter('velocidad_correccion', 0.05)  # Velocidad reducida al corregir ángulos grandes (m/s)
+        # Parámetros geométricos y de avance (sincronizados con correccion_trayectoria)
+        self.declare_parameter('distancia_meta', 0.85)         # Distancia a la hilera (m)
+        self.declare_parameter('distancia_frenado', 0.50)      # Umbral obstáculo TF-Mini (m)
+        self.declare_parameter('velocidad_avance', 0.20)       # Velocidad lineal habitual (m/s)
+        self.declare_parameter('velocidad_correccion', 0.065)  # Velocidad reducida al corregir ángulos grandes (m/s)
 
         # Parámetros de corrección suave de rumbo PID (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 45.0)              # Ganancia proporcional (grados por metro de error)
-        self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
-        self.declare_parameter('kd_rumbo', 15.0)              # Ganancia derivativa (grados por m/s de variación de error)
-        self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
-        self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
-        self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
-        self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
-        self.declare_parameter('umbral_angulo_lento', 12.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
-        self.declare_parameter('umbral_angulo_reanudar', 6.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
+        self.declare_parameter('kp_rumbo', 30.0)               # Ganancia proporcional (grados por metro de error)
+        self.declare_parameter('ki_rumbo', 5.0)                # Ganancia integral para vencer offset IMU y fricción
+        self.declare_parameter('kd_rumbo', 5.0)                # Ganancia derivativa (grados por m/s de variación de error)
+        self.declare_parameter('min_grados_rumbo', 7.0)        # Ángulo mínimo efectivo para mover las 4 ruedas
+        self.declare_parameter('max_grados_rumbo', 30.0)       # Límite de ángulo suave. Tope máximo de giro
+        self.declare_parameter('slew_rate_deg_s', 15.0)        # Rampa máxima de giro. Velocidad de giro
+        self.declare_parameter('alpha_dist', 0.40)             # Filtro distancia tronco
+        self.declare_parameter('umbral_angulo_lento', 18.0)    # Ángulo de corrección (>=) que activa baja velocidad (0.065 m/s)
+        self.declare_parameter('umbral_angulo_reanudar', 6.0)  # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
-        # Parámetros de la rutina de árboles, inspección MAPIR y brazo
+        # Parámetros de la rutina de árboles, inspección MAPIR y barrido del brazo
         self.declare_parameter('meta_arboles', 4)
         self.declare_parameter('timeout_sin_arbol', 50.0)
-        self.declare_parameter('tiempo_delay_brazo', 1.5)          # Delay tras detección LiDAR para alinear brazo/MAPIR (s)
+        self.declare_parameter('tiempo_barrido_brazo', 2.5)        # Tiempo avanzando con el brazo extendido haciendo barrido (s)
+        self.declare_parameter('tiempo_delay_brazo', 1.5)          # Parámetro legado (no usado en modo barrido)
         self.declare_parameter('tiempo_verificacion_maleza', 2.0)  # Ventana de inspección MAPIR estando detenido (s)
         self.declare_parameter('tiempo_estabilizacion_camara', 0.3) # Espera tras frenar antes de muestrear MAPIR (s)
-        self.declare_parameter('tiempo_brazo_extendido', 4.0)      # Tiempo detenido con el brazo ya extendido (s)
+        self.declare_parameter('tiempo_brazo_extendido', 2.0)      # Parámetro legado / respaldo (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)         # Ceguera temporal para avanzar al siguiente tronco (s)
         self.declare_parameter('desplazamiento_brazo_mm', 600.0)   # +600 mm (+60 cm) extiende, -600 mm retrae
 
@@ -91,6 +89,7 @@ class MapirRutinaNavegacion(Node):
 
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
+        self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
         self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_verificacion_maleza = float(self.get_parameter('tiempo_verificacion_maleza').value)
         self.tiempo_estabilizacion_camara = float(self.get_parameter('tiempo_estabilizacion_camara').value)
@@ -107,6 +106,7 @@ class MapirRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.stop_pub = self.create_publisher(Bool, '/navegacion/stop', 10)
+        self.stop_mov_pub = self.create_publisher(Bool, '/navegacion/stop_mov', 10)
         self.grados_pub = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
         self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
 
@@ -152,6 +152,15 @@ class MapirRutinaNavegacion(Node):
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = True
 
+        # Métricas acumuladas para el reporte final de la rutina
+        self.inicio_rutina_ts = None
+        self.tiempo_rutina_total = 0.0
+        self.distancia_recorrida = 0.0
+        self.velocidad_promedio = 0.0
+        self.rutina_finalizada = False
+        self.motivo_fin_rutina = ""
+        self.ciclos_cierre = 0
+
         # Variables de guiado lateral y rumbo IMU (PID + adaptación de velocidad)
         self.distancia_tronco_actual = None
         self.ultimo_tronco_guia_ts = None
@@ -184,10 +193,9 @@ class MapirRutinaNavegacion(Node):
 
         self.get_logger().info(
             f"mapir_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
-            f"Delay alineación: {self.tiempo_delay_brazo:.1f}s | "
             f"Inspección MAPIR: {self.tiempo_verificacion_maleza:.1f}s | "
-            f"Espera brazo extendido: {self.tiempo_brazo_extendido:.1f}s | "
-            f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm"
+            f"Modo BARRIDO (solo si hay maleza): {self.tiempo_barrido_brazo:.1f}s | "
+            f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm (confirmación STM32: 4=ext, 3=ret)"
         )
 
     # =========================================================================
@@ -308,6 +316,20 @@ class MapirRutinaNavegacion(Node):
 
         self.brazo_pub.publish(msg_brazo)
 
+    def comandar_stop_mov(self):
+        """
+        Envía la orden explícita STOP_Mov (Orden 11) a la STM32 a través de /navegacion/stop_mov
+        y fija /cmd_vel en 0.0 m/s para detener las ruedas inmediatamente sin apagar el stepper.
+        """
+        msg_stop_mov = Bool()
+        msg_stop_mov.data = True
+        self.stop_mov_pub.publish(msg_stop_mov)
+
+        msg_vel = Twist()
+        msg_vel.linear.x = 0.0
+        msg_vel.angular.z = 0.0
+        self.cmd_pub.publish(msg_vel)
+
     def detener_todo_emergencia(self):
         """Envía STOP_All y velocidad 0.0 m/s."""
         msg_stop = Bool()
@@ -335,6 +357,35 @@ class MapirRutinaNavegacion(Node):
         self.tiempo_inicio_estado = now - self.tiempo_transcurrido_guardado
         self.tiempo_ultimo_arbol = now - self.tiempo_sin_ver_arbol_guardado
 
+    def _finalizar_rutina_con_reporte(self, motivo: str):
+        """
+        Detiene el robot, imprime el reporte completo en consola
+        y activa la secuencia de cierre limpio del nodo.
+        """
+        self.estado_actual = 'FINALIZADO'
+        self.motivo_fin_rutina = motivo
+        self.detener_todo_emergencia()
+
+        if not self.rutina_finalizada:
+            self.rutina_finalizada = True
+            self.ciclos_cierre = 0
+            minutos = int(self.tiempo_rutina_total // 60)
+            segundos = self.tiempo_rutina_total % 60.0
+            reporte = (
+                "\n"
+                "============================================================\n"
+                "                 REPORTE FINAL DE LA RUTINA                 \n"
+                "============================================================\n"
+                f" Motivo de término   : {self.motivo_fin_rutina}\n"
+                f" Tiempo de rutina    : {self.tiempo_rutina_total:.2f} s ({minutos}m {segundos:04.1f}s)\n"
+                f" Velocidad promedio  : {self.velocidad_promedio:.3f} m/s "
+                f"(distancia est.: {self.distancia_recorrida:.2f} m)\n"
+                f" Árboles encontrados : {self.arboles_procesados} / {self.meta_arboles}\n"
+                f" Malezas encontradas : {self.arboles_con_maleza}\n"
+                "============================================================"
+            )
+            self.get_logger().info(reporte)
+
     def _actualizar_y_publicar_rumbo(self, now: float, permitir_correccion_lateral: bool):
         """
         Calcula y publica el rumbo objetivo hacia la STM32 por /navegacion/corregir_grados:
@@ -342,8 +393,8 @@ class MapirRutinaNavegacion(Node):
           aplica control PID (Proporcional + Integral + Derivativo) + ángulo mínimo efectivo
           (`min_grados_rumbo`) para vencer la fricción de las 4 ruedas y amortiguar sobrepasos.
         - Evalúa la magnitud del ángulo a corregir (`angulo_correccion`): si supera
-          `umbral_angulo_lento` (12° por defecto), activa `self.en_correccion_lenta = True`
-          para bajar la velocidad lineal a `velocidad_correccion` (0.05 m/s) hasta que el
+          `umbral_angulo_lento` (18° por defecto), activa `self.en_correccion_lenta = True`
+          para bajar la velocidad lineal a `velocidad_correccion` (0.065 m/s) hasta que el
           ángulo se reduzca por debajo de `umbral_angulo_reanudar` (6° por defecto).
         - Cuando el error entra en la banda muerta (< 3 cm) o no hay tronco guía, mantiene
           el rumbo base acumulado (`self.rumbo_integral`).
@@ -371,7 +422,7 @@ class MapirRutinaNavegacion(Node):
                 )
             self.error_previo = error
 
-            if abs(error) < 0.03:  # Dentro de +-3 cm de 0.70 m: mantener rumbo base actual
+            if abs(error) < 0.03:  # Dentro de +-3 cm de distancia_meta (0.85 m): mantener rumbo base actual
                 rumbo_objetivo = self.rumbo_integral
                 angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
             else:
@@ -428,7 +479,7 @@ class MapirRutinaNavegacion(Node):
                 self.get_logger().info(
                     f"[VELOCIDAD] Ángulo a corregir grande ({angulo_correccion:.1f}° >= "
                     f"{self.umbral_angulo_lento:.1f}°) -> Reduciendo velocidad a "
-                    f"{self.velocidad_correccion:.2f} m/s para completar giro"
+                    f"{self.velocidad_correccion:.3f} m/s para completar giro"
                 )
             elif self.en_correccion_lenta and angulo_correccion <= self.umbral_angulo_reanudar:
                 self.en_correccion_lenta = False
@@ -461,22 +512,23 @@ class MapirRutinaNavegacion(Node):
                 vel_actual = self.velocidad_correccion if self.en_correccion_lenta else self.velocidad_avance
                 self.get_logger().info(
                     f"[RUMBO] {ref_str} -> SET_Heading: {self.rumbo_suavizado:.1f}° "
-                    f"(obj: {rumbo_objetivo:.1f}°, vel: {vel_actual:.2f} m/s)"
+                    f"(obj: {rumbo_objetivo:.1f}°, vel: {vel_actual:.3f} m/s)"
                 )
             self.ultimo_rumbo_enviado = self.rumbo_suavizado
             self.ultimo_envio_grados_ts = now
 
     def _finalizar_o_continuar_siguiente_arbol(self, now: float, motivo_log: str):
         """
-        Decide si finalizar la rutina (cuando ya se alcanzó `meta_arboles`) o
+        Decide si finalizar la rutina con reporte (cuando ya se alcanzó `meta_arboles`) o
         pasar a `ENFRIAMIENTO` para avanzar hacia el siguiente árbol.
         """
         if self.arboles_procesados >= self.meta_arboles:
-            self.estado_actual = 'FINALIZADO'
-            self.detener_todo_emergencia()
             self.get_logger().info(
                 f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles inspeccionados, "
                 f"{self.arboles_con_maleza} con maleza). {motivo_log} Robot detenido por completo."
+            )
+            self._finalizar_rutina_con_reporte(
+                motivo=f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles)"
             )
             return True
         else:
@@ -495,16 +547,19 @@ class MapirRutinaNavegacion(Node):
     def control_loop(self):
         now = time.monotonic()
 
-        # Si la rutina ya terminó, mantener todo apagado con STOP_All
+        # Si la rutina ya terminó, mantener todo apagado con STOP_All y cerrar el nodo
         if self.estado_actual == 'FINALIZADO':
             self.detener_todo_emergencia()
+            self.ciclos_cierre += 1
+            if self.ciclos_cierre >= 4:
+                self.control_timer.cancel()
+                raise SystemExit(0)
             return
 
         # Verificación de Watchdogs de Sensores
         detenido_en_arbol = self.estado_actual in (
             'VERIFICANDO_MALEZA',
             'EXTENDIENDO_BRAZO',
-            'MANTENIENDO_BRAZO',
             'RETRAYENDO_BRAZO',
         )
         lidar_ok = (self.ultimo_lidar_ts is not None and (now - self.ultimo_lidar_ts) <= self.lidar_timeout)
@@ -532,9 +587,11 @@ class MapirRutinaNavegacion(Node):
             return
 
         elif self.en_pausa_por_watchdog and lidar_ok and tfmini_ok:
+            if self.inicio_rutina_ts is None:
+                self.inicio_rutina_ts = now
             self._restaurar_relojes(now)
             self.en_pausa_por_watchdog = False
-            self.get_logger().info("Sensores ok. Iniciando/reanudando rutina con integración MAPIR")
+            self.get_logger().info("Sensores ok. Iniciando/reanudando rutina con integración MAPIR y barrido")
 
         # ---------------------------------------------------------------------
         # Obstáculo Frontal (solo detiene cuando el robot pretende avanzar)
@@ -568,7 +625,7 @@ class MapirRutinaNavegacion(Node):
         msg_vel = Twist()
 
         # ---------------------------------------------------------------------
-        # Máquina de Estados: Navegación + Inspección MAPIR + Brazo
+        # Máquina de Estados: Navegación + Inspección MAPIR + Barrido de Brazo
         # ---------------------------------------------------------------------
         if self.estado_actual == 'AVANZANDO':
             # Garantía de seguridad: solo avanzar si el brazo está retraído
@@ -584,35 +641,23 @@ class MapirRutinaNavegacion(Node):
 
             # Criterio de parada por timeout sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
-                self.estado_actual = 'FINALIZADO'
-                self.detener_todo_emergencia()
                 self.get_logger().error(
                     f"TIMEOUT: {tiempo_sin_ver_arbol:.1f}s sin detectar ningún árbol. "
-                    "Deteniendo robot."
+                    "Deteniendo robot y generando reporte final."
+                )
+                self._finalizar_rutina_con_reporte(
+                    motivo=f"Timeout ({tiempo_sin_ver_arbol:.1f}s sin detectar árboles)"
                 )
                 return
 
-            # Detección de tronco confirmada a la altura del LiDAR
+            # Detección de tronco confirmada a la altura del LiDAR:
+            # Detenerse inmediatamente con STOP_Mov y verificar con la cámara MAPIR si hay maleza
             if self.arbol_en_mira:
                 self.arboles_procesados += 1
                 self.tiempo_inicio_estado = now
                 self.tiempo_ultimo_arbol = now
-                self.estado_actual = 'ALINEANDO_BRAZO'
-                self.get_logger().info(
-                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
-                    f"Avanzando {self.tiempo_delay_brazo:.1f}s para alinear cámara MAPIR y brazo..."
-                )
-
-        elif self.estado_actual == 'ALINEANDO_BRAZO':
-            # Sigue avanzando durante tiempo_delay_brazo para alinear la parte trasera con el tronco
-            if tiempo_transcurrido < self.tiempo_delay_brazo:
-                msg_vel.linear.x = self.velocidad_avance
-                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
-            else:
-                # Detener ruedas (STOP_Mov) e iniciar inspección de maleza con la cámara MAPIR.
-                # Al detenerse, real_stm32_bridge ejecuta RESET_TRACKING (fijando la orientación
-                # ya alineada frente al árbol como nuevo 0.0°), por lo que reiniciamos los acumuladores.
                 msg_vel.linear.x = 0.0
+                self.comandar_stop_mov()
                 self.rumbo_integral = 0.0
                 self.rumbo_suavizado = 0.0
                 self.ultimo_rumbo_enviado = 0.0
@@ -622,21 +667,22 @@ class MapirRutinaNavegacion(Node):
                 self.maleza_detectada_en_parada = False
                 self.max_cobertura_en_parada = 0.0
                 self.estado_actual = 'VERIFICANDO_MALEZA'
-                self.tiempo_inicio_estado = now
                 self.get_logger().info(
-                    f"Robot detenido frente al tronco {self.arboles_procesados}/{self.meta_arboles}. "
-                    f"Verificando presencia de maleza con cámara MAPIR ({self.tiempo_verificacion_maleza:.1f}s)..."
+                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
+                    f"Enviando STOP_Mov inmediatamente y verificando maleza con cámara MAPIR "
+                    f"({self.tiempo_verificacion_maleza:.1f}s)..."
                 )
+                return
 
         elif self.estado_actual == 'VERIFICANDO_MALEZA':
-            # Robot detenido mientras la cámara MAPIR analiza si existe maleza al pie del tronco
+            # Robot detenido mientras la cámara MAPIR analiza si existe maleza junto al tronco
             msg_vel.linear.x = 0.0
 
             # También considerar la lectura actual una vez pasado el tiempo de estabilización
             if tiempo_transcurrido >= self.tiempo_estabilizacion_camara and self.maleza_actual_topic:
                 self.maleza_detectada_en_parada = True
 
-            # CASO A: Se confirma presencia de maleza -> Activar secuencia de brazo
+            # CASO A: La MAPIR confirma presencia de maleza -> Activar secuencia de BARRIDO del brazo
             if self.maleza_detectada_en_parada:
                 self.arboles_con_maleza += 1
                 self.orden_extender_enviada = False
@@ -649,7 +695,7 @@ class MapirRutinaNavegacion(Node):
                 self.get_logger().info(
                     f"[MAPIR] Maleza DETECTADA en tronco {self.arboles_procesados}/{self.meta_arboles} "
                     f"(cobertura: {self.max_cobertura_en_parada:.1f}%). "
-                    f"Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm (esperando código 4 de STM32)..."
+                    f"Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm para iniciar barrido..."
                 )
 
             # CASO B: Terminó el tiempo de inspección y NO hay maleza -> NO activar brazo y continuar
@@ -659,7 +705,7 @@ class MapirRutinaNavegacion(Node):
                     "NO se acciona el brazo."
                 )
                 if self._finalizar_o_continuar_siguiente_arbol(
-                    now, motivo_log="Sin maleza (brazo omitido)."
+                    now, motivo_log="Sin maleza (barrido omitido)."
                 ):
                     return
 
@@ -672,38 +718,51 @@ class MapirRutinaNavegacion(Node):
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
 
+            # Cuando la STM32 confirma código 4 (brazo extendido), inicia el avance de barrido por `tiempo_barrido_brazo`
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
-                self.estado_actual = 'MANTENIENDO_BRAZO'
+                self.estado_actual = 'BARRIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
-                    f"STM32 confirmó brazo totalmente extendido (código 4). "
-                    f"Manteniendo robot detenido con brazo extendido por {self.tiempo_brazo_extendido:.1f}s..."
+                    f"STM32 confirmó brazo extendido (código 4). "
+                    f"Iniciando barrido: avanzando durante {self.tiempo_barrido_brazo:.1f}s con brazo extendido..."
                 )
 
-        elif self.estado_actual == 'MANTENIENDO_BRAZO':
-            # Robot detenido con el brazo completamente extendido durante 4.0 s
-            msg_vel.linear.x = 0.0
-
-            if tiempo_transcurrido >= self.tiempo_brazo_extendido:
+        elif self.estado_actual == 'BARRIENDO_BRAZO':
+            # El robot avanza en línea recta con el brazo extendido durante `tiempo_barrido_brazo` (2.5 s)
+            # y luego se detiene con STOP_Mov para retraer el brazo
+            if tiempo_transcurrido < self.tiempo_barrido_brazo:
+                msg_vel.linear.x = self.velocidad_avance
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            else:
+                msg_vel.linear.x = 0.0
+                self.comandar_stop_mov()
+                self.rumbo_integral = 0.0
+                self.rumbo_suavizado = 0.0
+                self.ultimo_rumbo_enviado = 0.0
                 self.stm32_brazo_retraido = False
+                self.orden_retraer_enviada = False
                 self.estado_actual = 'RETRAYENDO_BRAZO'
                 self.tiempo_inicio_estado = now
-                self.comandar_brazo('RETRAER')
-                self.orden_retraer_enviada = True
                 self.get_logger().info(
-                    f"Espera con brazo extendido completada ({tiempo_transcurrido:.1f}s). "
-                    f"Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm "
+                    f"Barrido completado ({tiempo_transcurrido:.1f}s). "
+                    f"Enviando STOP_Mov y retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm "
                     "(esperando confirmación código 3 de STM32)..."
                 )
+                return
 
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
             # Ruedas detenidas mientras el brazo se retrae; espera el mensaje código 3 de la STM32
             msg_vel.linear.x = 0.0
 
+            # Enviar la orden de retraer tras 0.10 s de haber detenido las ruedas del barrido
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.10:
+                self.comandar_brazo('RETRAER')
+                self.orden_retraer_enviada = True
+
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
                 self.brazo_retraido_confirmado = True
                 if self._finalizar_o_continuar_siguiente_arbol(
-                    now, motivo_log="Maleza tratada y brazo retraído (código 3 STM32)."
+                    now, motivo_log="Maleza barrida y brazo retraído (código 3 STM32)."
                 ):
                     return
 
@@ -727,13 +786,20 @@ class MapirRutinaNavegacion(Node):
 
         self.cmd_pub.publish(msg_vel)
 
+        # Actualizar tiempo de rutina y velocidad promedio para el reporte final
+        if self.inicio_rutina_ts is not None and not self.rutina_finalizada:
+            self.tiempo_rutina_total += self.dt
+            self.distancia_recorrida += abs(float(msg_vel.linear.x)) * self.dt
+            if self.tiempo_rutina_total > 1e-6:
+                self.velocidad_promedio = self.distancia_recorrida / self.tiempo_rutina_total
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = MapirRutinaNavegacion()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         if rclpy.ok():

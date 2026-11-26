@@ -19,27 +19,28 @@ class RealRutinaNavegacion(Node):
         # Declaración de parámetros 
         # ---------------------------------------------------------------------
         # Parámetros geométricos y de avance
-        self.declare_parameter('distancia_meta', 0.70)        # Distancia a la hilera (m)
+        self.declare_parameter('distancia_meta', 0.85)        # Distancia a la hilera (m)
         self.declare_parameter('distancia_frenado', 0.50)     # Umbral obstáculo TF-Mini (m)
         self.declare_parameter('velocidad_avance', 0.20)      # Velocidad lineal habitual (m/s)
-        self.declare_parameter('velocidad_correccion', 0.05)  # Velocidad reducida al corregir ángulos grandes (m/s)
+        self.declare_parameter('velocidad_correccion', 0.065)  # Velocidad reducida al corregir ángulos grandes (m/s)
 
         # Parámetros de corrección suave de rumbo PID (LiDAR + IMU)
-        self.declare_parameter('kp_rumbo', 45.0)              # Ganancia proporcional (grados por metro de error)
-        self.declare_parameter('ki_rumbo', 20.0)              # Ganancia integral para vencer offset IMU y fricción
-        self.declare_parameter('kd_rumbo', 15.0)              # Ganancia derivativa (grados por m/s de variación de error)
+        self.declare_parameter('kp_rumbo', 30.0)              # Ganancia proporcional (grados por metro de error) kp=55
+        self.declare_parameter('ki_rumbo', 5.0)              # Ganancia integral para vencer offset IMU y fricción ki=20
+        self.declare_parameter('kd_rumbo', 5.0)              # Ganancia derivativa (grados por m/s de variación de error) kd=15
         self.declare_parameter('min_grados_rumbo', 7.0)       # Ángulo mínimo efectivo para mover las 4 ruedas
         self.declare_parameter('max_grados_rumbo', 30.0)      # Límite de ángulo suave. Tope maximo de giro
         self.declare_parameter('slew_rate_deg_s', 15.0)       # Rampa máxima de giro. Velocidad de giro
         self.declare_parameter('alpha_dist', 0.40)            # Filtro distancia tronco
-        self.declare_parameter('umbral_angulo_lento', 12.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
+        self.declare_parameter('umbral_angulo_lento', 18.0)   # Ángulo de corrección (>=) que activa baja velocidad (0.05 m/s)
         self.declare_parameter('umbral_angulo_reanudar', 6.0) # Ángulo (<=) bajo el cual se considera corregido y vuelve a 0.20 m/s
 
         # Parámetros de la rutina de árboles y brazo
         self.declare_parameter('meta_arboles', 4)      
         self.declare_parameter('timeout_sin_arbol', 50.0)    
-        self.declare_parameter('tiempo_delay_brazo', 1.5)         # Delay tras detección LiDAR para alinear brazo (s)
-        self.declare_parameter('tiempo_brazo_extendido', 4.0)     # Tiempo detenido con el brazo ya extendido (s)
+        self.declare_parameter('tiempo_barrido_brazo', 2.5)       # Tiempo avanzando con el brazo extendido haciendo barrido (s)
+        self.declare_parameter('tiempo_delay_brazo', 1.5)         # Parámetro legado (no usado en modo barrido)
+        self.declare_parameter('tiempo_brazo_extendido', 2.0)     # Respaldo / alias para duración con brazo extendido (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)        # Ceguera temporal para avanzar a sgte tronco (s)
         self.declare_parameter('desplazamiento_brazo_mm', 600.0)  # +600 mm (+60 cm) extiende, -600 mm retrae
 
@@ -65,6 +66,7 @@ class RealRutinaNavegacion(Node):
 
         self.meta_arboles = int(self.get_parameter('meta_arboles').value)
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
+        self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
         self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_brazo_extendido = float(self.get_parameter('tiempo_brazo_extendido').value)
         self.tiempo_enfriamiento = float(self.get_parameter('tiempo_enfriamiento').value)
@@ -79,6 +81,7 @@ class RealRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.stop_pub = self.create_publisher(Bool, '/navegacion/stop', 10)
+        self.stop_mov_pub = self.create_publisher(Bool, '/navegacion/stop_mov', 10)
         self.grados_pub = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
         self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
 
@@ -96,6 +99,7 @@ class RealRutinaNavegacion(Node):
         # ---------------------------------------------------------------------
         self.estado_actual = 'AVANZANDO'
         self.arboles_procesados = 0
+        self.arboles_con_maleza = 0
         self.arbol_en_mira = False
         self.brazo_extendido = False
         self.orden_extender_enviada = False
@@ -103,6 +107,15 @@ class RealRutinaNavegacion(Node):
         self.stm32_brazo_extendido = False
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = True
+
+        # Métricas acumuladas para el reporte final de la rutina
+        self.inicio_rutina_ts = None
+        self.tiempo_rutina_total = 0.0
+        self.distancia_recorrida = 0.0
+        self.velocidad_promedio = 0.0
+        self.rutina_finalizada = False
+        self.motivo_fin_rutina = ""
+        self.ciclos_cierre = 0
 
         # Variables de guiado lateral y rumbo IMU (PID + adaptación de velocidad)
         self.distancia_tronco_actual = None
@@ -136,8 +149,7 @@ class RealRutinaNavegacion(Node):
 
         self.get_logger().info(
             f"real_rutina_navegacion iniciado | Meta: {self.meta_arboles} árboles | "
-            f"Delay alineación: {self.tiempo_delay_brazo:.1f}s | "
-            f"Espera con brazo extendido: {self.tiempo_brazo_extendido:.1f}s | "
+            f"Modo BARRIDO: avance con brazo extendido por {self.tiempo_barrido_brazo:.1f}s | "
             f"Recorrido brazo: {self.desplazamiento_brazo_mm:.0f}mm (confirmación por STM32: 4=ext, 3=ret)"
         )
 
@@ -239,6 +251,20 @@ class RealRutinaNavegacion(Node):
 
         self.brazo_pub.publish(msg_brazo)
 
+    def comandar_stop_mov(self):
+        """
+        Envía la orden explícita STOP_Mov (Orden 11) a la STM32 a través de /navegacion/stop_mov
+        y fija /cmd_vel en 0.0 m/s para detener las ruedas inmediatamente sin apagar el stepper.
+        """
+        msg_stop_mov = Bool()
+        msg_stop_mov.data = True
+        self.stop_mov_pub.publish(msg_stop_mov)
+
+        msg_vel = Twist()
+        msg_vel.linear.x = 0.0
+        msg_vel.angular.z = 0.0
+        self.cmd_pub.publish(msg_vel)
+
     def detener_todo_emergencia(self):
         """
         Envía STOP_All y velocidad 0.0 m/s
@@ -267,6 +293,35 @@ class RealRutinaNavegacion(Node):
         """Restaura los tiempos transcurridos al reanudarse la operación"""
         self.tiempo_inicio_estado = now - self.tiempo_transcurrido_guardado
         self.tiempo_ultimo_arbol = now - self.tiempo_sin_ver_arbol_guardado
+
+    def _finalizar_rutina_con_reporte(self, motivo: str):
+        """
+        Detiene el robot, imprime el reporte completo en consola
+        y activa la secuencia de cierre limpio del nodo.
+        """
+        self.estado_actual = 'FINALIZADO'
+        self.motivo_fin_rutina = motivo
+        self.detener_todo_emergencia()
+
+        if not self.rutina_finalizada:
+            self.rutina_finalizada = True
+            self.ciclos_cierre = 0
+            minutos = int(self.tiempo_rutina_total // 60)
+            segundos = self.tiempo_rutina_total % 60.0
+            reporte = (
+                "\n"
+                "============================================================\n"
+                "                 REPORTE FINAL DE LA RUTINA                 \n"
+                "============================================================\n"
+                f" Motivo de término   : {self.motivo_fin_rutina}\n"
+                f" Tiempo de rutina    : {self.tiempo_rutina_total:.2f} s ({minutos}m {segundos:04.1f}s)\n"
+                f" Velocidad promedio  : {self.velocidad_promedio:.3f} m/s "
+                f"(distancia est.: {self.distancia_recorrida:.2f} m)\n"
+                f" Árboles encontrados : {self.arboles_procesados} / {self.meta_arboles}\n"
+                f" Malezas encontradas : {self.arboles_con_maleza}\n"
+                "============================================================"
+            )
+            self.get_logger().info(reporte)
 
     def _actualizar_y_publicar_rumbo(self, now: float, permitir_correccion_lateral: bool):
         """
@@ -304,7 +359,7 @@ class RealRutinaNavegacion(Node):
                 )
             self.error_previo = error
 
-            if abs(error) < 0.03:  # Dentro de +-3 cm de 0.70 m: mantener rumbo base actual
+            if abs(error) < 0.03:  # Dentro de +-3 cm de distancia_meta (0.85 m): mantener rumbo base actual
                 rumbo_objetivo = self.rumbo_integral
                 angulo_correccion = abs(rumbo_objetivo - self.rumbo_suavizado)
             else:
@@ -405,15 +460,18 @@ class RealRutinaNavegacion(Node):
     def control_loop(self):
         now = time.monotonic()
 
-        # Si la rutina ya terminó, mantener todo apagado con STOP_All
+        # Si la rutina ya terminó, mantener todo apagado con STOP_All y cerrar el nodo
         if self.estado_actual == 'FINALIZADO':
             self.detener_todo_emergencia()
+            self.ciclos_cierre += 1
+            if self.ciclos_cierre >= 4:
+                self.control_timer.cancel()
+                raise SystemExit(0)
             return
 
         # Verificación de Watchdogs de Sensores. Revisa si pasó mucho tiempo desde la ultima recepcion de datos de sensores
         operando_brazo_detenido = self.estado_actual in (
             'EXTENDIENDO_BRAZO',
-            'MANTENIENDO_BRAZO',
             'RETRAYENDO_BRAZO',
         )
         lidar_ok = (self.ultimo_lidar_ts is not None and (now - self.ultimo_lidar_ts) <= self.lidar_timeout)
@@ -441,6 +499,8 @@ class RealRutinaNavegacion(Node):
 
         # Si todo esta ok, quitar la pausa
         elif self.en_pausa_por_watchdog and lidar_ok and tfmini_ok:
+            if self.inicio_rutina_ts is None:
+                self.inicio_rutina_ts = now
             self._restaurar_relojes(now)
             self.en_pausa_por_watchdog = False
             self.get_logger().info("Sensores ok. Iniciando/reanudando rutina de árboles")
@@ -495,35 +555,23 @@ class RealRutinaNavegacion(Node):
 
             # Criterio de parada por timeout de 20 segundos sin detectar árboles
             if tiempo_sin_ver_arbol >= self.timeout_sin_arbol:
-                self.estado_actual = 'FINALIZADO'
-                self.detener_todo_emergencia()
                 self.get_logger().error(
-                    f"TIMEOUT: {tiempo_sin_ver_arbol:.1f}s sin detectar ningún árbol "
-                    f"Deteniendo robot"
+                    f"TIMEOUT: {tiempo_sin_ver_arbol:.1f}s sin detectar ningún árbol. "
+                    "Deteniendo robot y generando reporte final."
+                )
+                self._finalizar_rutina_con_reporte(
+                    motivo=f"Timeout ({tiempo_sin_ver_arbol:.1f}s sin detectar árboles)"
                 )
                 return
 
-            # Detección de tronco confirmada a la altura del LiDAR
+            # Detección de tronco confirmada a la altura del LiDAR:
+            # Detenerse inmediatamente con STOP_Mov y extender el brazo para iniciar el barrido
             if self.arbol_en_mira:
                 self.arboles_procesados += 1
                 self.tiempo_inicio_estado = now
                 self.tiempo_ultimo_arbol = now
-                self.estado_actual = 'ALINEANDO_BRAZO'
-                self.get_logger().info(
-                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
-                    f"Alineando brazo por {self.tiempo_delay_brazo:.1f}s"
-                )
-
-        elif self.estado_actual == 'ALINEANDO_BRAZO':
-            # Sigue avanzando durante tiempo_delay_brazo para que el brazo quede alineado frente al tronco detectado
-            if tiempo_transcurrido < self.tiempo_delay_brazo:
-                msg_vel.linear.x = self.velocidad_avance
-                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
-            else:
-                # Detener primero las ruedas (STOP_Mov) antes de iniciar la extensión del brazo.
-                # Al detenerse, real_stm32_bridge ejecuta RESET_TRACKING (fijando la orientación
-                # ya alineada frente al árbol como nuevo 0.0°), por lo que reiniciamos los acumuladores.
                 msg_vel.linear.x = 0.0
+                self.comandar_stop_mov()
                 self.rumbo_integral = 0.0
                 self.rumbo_suavizado = 0.0
                 self.ultimo_rumbo_enviado = 0.0
@@ -536,11 +584,11 @@ class RealRutinaNavegacion(Node):
                 self.stm32_brazo_retraido = False
                 self.brazo_retraido_confirmado = False
                 self.estado_actual = 'EXTENDIENDO_BRAZO'
-                self.tiempo_inicio_estado = now
                 self.get_logger().info(
-                    f"Brazo alineado con tronco {self.arboles_procesados}. "
-                    f"Deteniendo ruedas y extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
+                    f"Tronco {self.arboles_procesados}/{self.meta_arboles} detectado. "
+                    f"Enviando STOP_Mov inmediatamente y extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm..."
                 )
+                return
 
         elif self.estado_actual == 'EXTENDIENDO_BRAZO':
             # Ruedas detenidas mientras el motor stepper recorre los +600 mm hasta que la STM32 envíe código 4
@@ -551,43 +599,58 @@ class RealRutinaNavegacion(Node):
                 self.stm32_brazo_extendido = False
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
+                self.arboles_con_maleza += 1
 
-            # Pasa al estado de espera de 4s únicamente cuando la STM32 confirma código 4 (brazo extendido)
+            # Cuando la STM32 confirma código 4 (brazo extendido), inicia el avance de barrido por 2.0 s
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
-                self.estado_actual = 'MANTENIENDO_BRAZO'
+                self.estado_actual = 'BARRIENDO_BRAZO'
                 self.tiempo_inicio_estado = now
                 self.get_logger().info(
-                    f"Manteniendo robot detenido con brazo extendido por {self.tiempo_brazo_extendido:.1f}s..."
+                    f"Brazo extendido (código 4). "
+                    f"Iniciando barrido: avanzando durante {self.tiempo_barrido_brazo:.1f}s con brazo extendido..."
                 )
 
-        elif self.estado_actual == 'MANTENIENDO_BRAZO':
-            # Robot detenido con el brazo completamente extendido durante 4.0 s
-            msg_vel.linear.x = 0.0
-
-            if tiempo_transcurrido >= self.tiempo_brazo_extendido:
+        elif self.estado_actual == 'BARRIENDO_BRAZO':
+            # El robot avanza en línea recta con el brazo extendido durante `tiempo_barrido_brazo` (2.0 s)
+            # y luego se detiene con STOP_Mov para retraer el brazo
+            if tiempo_transcurrido < self.tiempo_barrido_brazo:
+                msg_vel.linear.x = self.velocidad_avance
+                self._actualizar_y_publicar_rumbo(now, permitir_correccion_lateral=False)
+            else:
+                msg_vel.linear.x = 0.0
+                self.comandar_stop_mov()
+                self.rumbo_integral = 0.0
+                self.rumbo_suavizado = 0.0
+                self.ultimo_rumbo_enviado = 0.0
                 self.stm32_brazo_retraido = False
+                self.orden_retraer_enviada = False
                 self.estado_actual = 'RETRAYENDO_BRAZO'
                 self.tiempo_inicio_estado = now
-                self.comandar_brazo('RETRAER')
-                self.orden_retraer_enviada = True
                 self.get_logger().info(
-                    f"Espera con brazo extendido completada ({tiempo_transcurrido:.1f}s). "
-                    f"Retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm "
+                    f"Barrido completado ({tiempo_transcurrido:.1f}s). "
+                    f"Enviando STOP_Mov y retrayendo brazo -{self.desplazamiento_brazo_mm:.0f}mm..."
                 )
+                return
 
         elif self.estado_actual == 'RETRAYENDO_BRAZO':
             # Ruedas detenidas mientras el brazo se retrae; espera el mensaje código 3 de la STM32
             msg_vel.linear.x = 0.0
 
+            # Enviar la orden de retraer tras 0.10 s de haber detenido las ruedas del barrido
+            if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.10:
+                self.comandar_brazo('RETRAER')
+                self.orden_retraer_enviada = True
+
             # Avanza si y solo si se envió la orden de retraer y la STM32 confirmó código 3 (brazo totalmente retraído)
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
                 self.brazo_retraido_confirmado = True
                 if self.arboles_procesados >= self.meta_arboles:
-                    self.estado_actual = 'FINALIZADO'
-                    self.detener_todo_emergencia()
                     self.get_logger().info(
                         f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles procesados). "
                         "Brazo retraído y robot detenido por completo."
+                    )
+                    self._finalizar_rutina_con_reporte(
+                        motivo=f"Meta alcanzada ({self.arboles_procesados}/{self.meta_arboles} árboles)"
                     )
                     return
                 else:
@@ -595,7 +658,7 @@ class RealRutinaNavegacion(Node):
                     self.tiempo_inicio_estado = now
                     self.tiempo_ultimo_arbol = now
                     self.get_logger().info(
-                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado y brazo retraído"
+                        f"Árbol {self.arboles_procesados}/{self.meta_arboles} completado y brazo retraído. "
                         f"Reanudando marcha (enfriamiento de {self.tiempo_enfriamiento:.1f}s)..."
                     )
 
@@ -619,13 +682,20 @@ class RealRutinaNavegacion(Node):
 
         self.cmd_pub.publish(msg_vel)
 
+        # Actualizar tiempo de rutina y velocidad promedio para el reporte final
+        if self.inicio_rutina_ts is not None and not self.rutina_finalizada:
+            self.tiempo_rutina_total += self.dt
+            self.distancia_recorrida += abs(float(msg_vel.linear.x)) * self.dt
+            if self.tiempo_rutina_total > 1e-6:
+                self.velocidad_promedio = self.distancia_recorrida / self.tiempo_rutina_total
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = RealRutinaNavegacion()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         if rclpy.ok():

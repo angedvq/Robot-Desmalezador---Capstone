@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
 from launch.conditions import IfCondition, UnlessCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -20,6 +22,7 @@ def generate_launch_description():
     umbral_angulo_reanudar = LaunchConfiguration('umbral_angulo_reanudar')
     meta_arboles = LaunchConfiguration('meta_arboles')
     timeout_sin_arbol = LaunchConfiguration('timeout_sin_arbol')
+    tiempo_barrido_brazo = LaunchConfiguration('tiempo_barrido_brazo')
     tiempo_delay_brazo = LaunchConfiguration('tiempo_delay_brazo')
     tiempo_verificacion_maleza = LaunchConfiguration('tiempo_verificacion_maleza')
     tiempo_brazo_extendido = LaunchConfiguration('tiempo_brazo_extendido')
@@ -38,6 +41,55 @@ def generate_launch_description():
     area_min_px = LaunchConfiguration('area_min_px')
     mostrar_ventana = LaunchConfiguration('mostrar_ventana')
     log_calibracion = LaunchConfiguration('log_calibracion')
+
+    mapir_rutina_node = Node(
+        package='sensado',
+        executable='mapir_rutina_navegacion',
+        name='mapir_rutina_navegacion',
+        parameters=[{
+            'distancia_meta': distancia_meta,
+            'distancia_frenado': distancia_frenado,
+            'velocidad_avance': velocidad_avance,
+            'velocidad_correccion': velocidad_correccion,
+            'kd_rumbo': kd_rumbo,
+            'umbral_angulo_lento': umbral_angulo_lento,
+            'umbral_angulo_reanudar': umbral_angulo_reanudar,
+            'meta_arboles': meta_arboles,
+            'timeout_sin_arbol': timeout_sin_arbol,
+            'tiempo_barrido_brazo': tiempo_barrido_brazo,
+            'tiempo_delay_brazo': tiempo_delay_brazo,
+            'tiempo_verificacion_maleza': tiempo_verificacion_maleza,
+            'tiempo_brazo_extendido': tiempo_brazo_extendido,
+            'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
+            'usar_tfmini': usar_tfmini,
+        }],
+        condition=IfCondition(usar_mapir),
+        output='screen',
+    )
+
+    real_rutina_node = Node(
+        package='sensado',
+        executable='real_rutina_navegacion',
+        name='real_rutina_navegacion',
+        parameters=[{
+            'distancia_meta': distancia_meta,
+            'distancia_frenado': distancia_frenado,
+            'velocidad_avance': velocidad_avance,
+            'velocidad_correccion': velocidad_correccion,
+            'kd_rumbo': kd_rumbo,
+            'umbral_angulo_lento': umbral_angulo_lento,
+            'umbral_angulo_reanudar': umbral_angulo_reanudar,
+            'meta_arboles': meta_arboles,
+            'timeout_sin_arbol': timeout_sin_arbol,
+            'tiempo_barrido_brazo': tiempo_barrido_brazo,
+            'tiempo_delay_brazo': tiempo_delay_brazo,
+            'tiempo_brazo_extendido': tiempo_brazo_extendido,
+            'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
+            'usar_tfmini': usar_tfmini,
+        }],
+        condition=UnlessCondition(usar_mapir),
+        output='screen',
+    )
 
     return LaunchDescription([
         # ---------------------------------------------------------------------
@@ -65,7 +117,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'distancia_meta',
-            default_value='0.70',
+            default_value='0.85',
             description='Distancia perpendicular objetivo a la hilera de árboles (m)',
         ),
         DeclareLaunchArgument(
@@ -80,17 +132,17 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'velocidad_correccion',
-            default_value='0.05',
+            default_value='0.065',
             description='Velocidad reducida al corregir ángulos de rumbo grandes (m/s)',
         ),
         DeclareLaunchArgument(
             'kd_rumbo',
-            default_value='15.0',
+            default_value='5.0',
             description='Ganancia derivativa del control PID de rumbo (grados por m/s de variación de error)',
         ),
         DeclareLaunchArgument(
             'umbral_angulo_lento',
-            default_value='12.0',
+            default_value='18.0',
             description='Ángulo de corrección (grados) desde el cual el robot baja su velocidad a velocidad_correccion',
         ),
         DeclareLaunchArgument(
@@ -109,9 +161,14 @@ def generate_launch_description():
             description='Tiempo máximo sin detectar un árbol antes de detenerse (s)',
         ),
         DeclareLaunchArgument(
+            'tiempo_barrido_brazo',
+            default_value='2.5',
+            description='Tiempo que el robot avanza con el brazo extendido realizando el barrido (s)',
+        ),
+        DeclareLaunchArgument(
             'tiempo_delay_brazo',
             default_value='1.5',
-            description='Delay de avance tras detección LiDAR para alinear el brazo trasero y MAPIR (s)',
+            description='Parámetro legado de delay (no usado en modo barrido)',
         ),
         DeclareLaunchArgument(
             'tiempo_verificacion_maleza',
@@ -281,55 +338,38 @@ def generate_launch_description():
         ),
 
         # ---------------------------------------------------------------------
-        # Control autónomo CON cámara MAPIR (por defecto: usar_mapir:=true)
+        # Odometría y generación de mapa geométrico IEEE 1873
         # ---------------------------------------------------------------------
         Node(
             package='sensado',
-            executable='mapir_rutina_navegacion',
-            name='mapir_rutina_navegacion',
-            parameters=[{
-                'distancia_meta': distancia_meta,
-                'distancia_frenado': distancia_frenado,
-                'velocidad_avance': velocidad_avance,
-                'velocidad_correccion': velocidad_correccion,
-                'kd_rumbo': kd_rumbo,
-                'umbral_angulo_lento': umbral_angulo_lento,
-                'umbral_angulo_reanudar': umbral_angulo_reanudar,
-                'meta_arboles': meta_arboles,
-                'timeout_sin_arbol': timeout_sin_arbol,
-                'tiempo_delay_brazo': tiempo_delay_brazo,
-                'tiempo_verificacion_maleza': tiempo_verificacion_maleza,
-                'tiempo_brazo_extendido': tiempo_brazo_extendido,
-                'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
-                'usar_tfmini': usar_tfmini,
-            }],
-            condition=IfCondition(usar_mapir),
+            executable='odometria',
+            name='odometria',
+            output='screen',
+        ),
+        Node(
+            package='sensado',
+            executable='mapas_ieee1873',
+            name='mapas_ieee1873',
+            parameters=[{'meta_arboles': meta_arboles}],
             output='screen',
         ),
 
         # ---------------------------------------------------------------------
-        # Control autónomo SIN cámara MAPIR (respaldo intacto: usar_mapir:=false)
+        # Control autónomo CON cámara MAPIR (por defecto: usar_mapir:=true)
+        # y respaldo SIN cámara MAPIR (usar_mapir:=false), con cierre automático
         # ---------------------------------------------------------------------
-        Node(
-            package='sensado',
-            executable='real_rutina_navegacion',
-            name='real_rutina_navegacion',
-            parameters=[{
-                'distancia_meta': distancia_meta,
-                'distancia_frenado': distancia_frenado,
-                'velocidad_avance': velocidad_avance,
-                'velocidad_correccion': velocidad_correccion,
-                'kd_rumbo': kd_rumbo,
-                'umbral_angulo_lento': umbral_angulo_lento,
-                'umbral_angulo_reanudar': umbral_angulo_reanudar,
-                'meta_arboles': meta_arboles,
-                'timeout_sin_arbol': timeout_sin_arbol,
-                'tiempo_delay_brazo': tiempo_delay_brazo,
-                'tiempo_brazo_extendido': tiempo_brazo_extendido,
-                'desplazamiento_brazo_mm': desplazamiento_brazo_mm,
-                'usar_tfmini': usar_tfmini,
-            }],
-            condition=UnlessCondition(usar_mapir),
-            output='screen',
+        mapir_rutina_node,
+        real_rutina_node,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=mapir_rutina_node,
+                on_exit=[EmitEvent(event=Shutdown(reason='Rutina MAPIR finalizada'))],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=real_rutina_node,
+                on_exit=[EmitEvent(event=Shutdown(reason='Rutina de navegacion finalizada'))],
+            )
         ),
     ])
