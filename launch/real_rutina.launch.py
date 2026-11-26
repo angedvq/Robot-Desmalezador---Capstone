@@ -124,8 +124,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'umbral_nir_min',
-            default_value='150',
-            description='Intensidad NIR mínima absoluta para considerar maleza (0..255)',
+            default_value='25',
+            description='Intensidad NIR mínima absoluta para considerar maleza en baja luz/pasillo (0..255)',
         ),
         DeclareLaunchArgument(
             'umbral_nir_fijo',
@@ -134,8 +134,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'delta_contraste_fondo',
-            default_value='35',
-            description='Diferencia mínima de intensidad NIR sobre la mediana del suelo en modo híbrido',
+            default_value='14',
+            description='Diferencia base de intensidad sobre el suelo en modo híbrido adaptativo',
         ),
         DeclareLaunchArgument(
             'roi_ancho_cm',
