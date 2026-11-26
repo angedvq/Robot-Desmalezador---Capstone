@@ -66,6 +66,7 @@ class RealSTM32Bridge(Node):
         self.ultimo_rumbo = 0.0
         self.ultimo_cmd = 0.0
         self.bomba_encendida = False
+        self.ultimo_refresco_bomba_ts = 0.0
         self.brazo_extendido_confirmado = False
         self.stop_solicitado = False
         self.en_movimiento = False
@@ -174,12 +175,16 @@ class RealSTM32Bridge(Node):
                 )
                 return
             self.bomba_encendida = True
-            self.pendientes.append((START_BOMBA, 0.0))
-            self.get_logger().info("Orden bomba añadida: ENCENDER (START_Bomba = 7)")
+            self.ultimo_refresco_bomba_ts = time.monotonic()
+            # Encolar al frente (appendleft) para que START_BOMBA no quede detrás de SET_HEADING/SET_VEL
+            self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in (START_BOMBA, STOP_BOMBA))
+            self.pendientes.appendleft((START_BOMBA, 0.0))
+            self.get_logger().info("Orden bomba prioritaria añadida: ENCENDER (START_Bomba = 7)")
         else:
             self.bomba_encendida = False
-            self.pendientes.append((STOP_BOMBA, 0.0))
-            self.get_logger().info("Orden bomba añadida: APAGAR (STOP_Bomba = 8)")
+            self.pendientes = deque(cmd for cmd in self.pendientes if cmd[0] not in (START_BOMBA, STOP_BOMBA))
+            self.pendientes.appendleft((STOP_BOMBA, 0.0))
+            self.get_logger().info("Orden bomba prioritaria añadida: APAGAR (STOP_Bomba = 8)")
 
     def recibir_brazo(self, msg: Float32):
         """
@@ -203,7 +208,10 @@ class RealSTM32Bridge(Node):
         if abs(desplazamiento_mm) < 1e-3:
             self.pendientes.append((STOP_STEPPER, 0.0))
         else:
-            if desplazamiento_mm > 0.0:
+            # Solo limpiar brazo_extendido_confirmado si se inicia una extensión completa (> 50 mm)
+            # desde estado retraído; un micro-avance positivo (+8 mm) con el brazo ya extendido
+            # mantiene brazo_extendido_confirmado = True.
+            if desplazamiento_mm > 50.0 and not self.brazo_extendido_confirmado:
                 self.brazo_extendido_confirmado = False
             desplazamiento_cm = desplazamiento_mm / 10.0
             self.pendientes.append((MOVE_STEPPER, desplazamiento_cm))
@@ -267,6 +275,22 @@ class RealSTM32Bridge(Node):
         if sin_comandos:
             self.velocidad = 0.0
             self.stop_solicitado = True
+
+        # Si la bomba debe estar encendida y el brazo sigue extendido, re-enviar START_BOMBA
+        # cada 0.25 s. En Src/bomba.c de la STM32, START_Bomba() solo pone wake_flag=1 y si
+        # b_state ya está en WAKE o RUN no hace nada (es idempotente), pero si el primer
+        # paquete se perdió o llegó durante el retroceso de INTR_END(), esto garantiza que
+        # la bomba encienda apenas esté lista.
+        now_mono = time.monotonic()
+        if (
+            self.bomba_encendida
+            and self.brazo_extendido_confirmado
+            and not self.stop_solicitado
+            and (now_mono - self.ultimo_refresco_bomba_ts) >= 0.25
+        ):
+            self.ultimo_refresco_bomba_ts = now_mono
+            if not any(cmd[0] == START_BOMBA for cmd in self.pendientes):
+                self.pendientes.appendleft((START_BOMBA, 0.0))
 
         # ---------------------------------------------------------------------
         # Parada total por obstáculo, fin o watchdog

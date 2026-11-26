@@ -169,6 +169,11 @@ class BombaRutinaNavegacion(Node):
         self.stm32_brazo_extendido = False
         self.stm32_brazo_retraido = False
         self.brazo_retraido_confirmado = not self.usar_bomba
+        self.ts_codigo_brazo_extendido = None
+        self.ts_codigo_brazo_retraido = None
+        self.ts_orden_extender = None
+        self.rehoming_en_calibracion = False
+        self.micro_avance_end_enviado = False
 
         # Métricas acumuladas para el reporte final de la rutina
         self.inicio_rutina_ts = None
@@ -229,11 +234,14 @@ class BombaRutinaNavegacion(Node):
         codigo = int(msg.data)
         if codigo == STM32_BRAZO_EXTENDIDO:
             self.stm32_brazo_extendido = True
+            self.ts_codigo_brazo_extendido = time.monotonic()
+            self.micro_avance_end_enviado = False
             self.get_logger().info(
                 "[STM32 -> Navegación] Código 4 recibido: Brazo totalmente EXTENDIDO."
             )
         elif codigo == STM32_BRAZO_RETRAIDO:
             self.stm32_brazo_retraido = True
+            self.ts_codigo_brazo_retraido = time.monotonic()
             self.brazo_extendido = False
             self.brazo_retraido_confirmado = True
             self.get_logger().info(
@@ -683,23 +691,87 @@ class BombaRutinaNavegacion(Node):
         if self.estado_actual == 'CAL_EXTENDIENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
+            # Si al iniciar se detectó que el brazo ya estaba extendido (< 4.5 s en llegar a END),
+            # primero lo retraemos a HOME (código 3) para que la STM32 reinicie screw_step en INTR_HOME()
+            # y luego lo volvemos a extender el recorrido completo (> 390 mm).
+            if self.rehoming_en_calibracion:
+                if not self.orden_retraer_enviada and tiempo_transcurrido >= 0.50:
+                    self.stm32_brazo_retraido = False
+                    self.comandar_brazo('RETRAER')
+                    self.orden_retraer_enviada = True
+                elif self.orden_retraer_enviada and self.stm32_brazo_retraido:
+                    t_desde_home = (
+                        (now - self.ts_codigo_brazo_retraido)
+                        if self.ts_codigo_brazo_retraido is not None
+                        else 1.0
+                    )
+                    if t_desde_home >= 0.55:
+                        self.rehoming_en_calibracion = False
+                        self.orden_extender_enviada = False
+                        self.stm32_brazo_extendido = False
+                        self.tiempo_inicio_estado = now
+                        self.get_logger().info(
+                            "[CALIBRACIÓN BOMBA] Brazo sincronizado en HOME (código 3). "
+                            "Re-extendiendo recorrido completo para habilitar bomba en STM32..."
+                        )
+                return
+
             if not self.orden_extender_enviada and tiempo_transcurrido >= 0.50:
                 self.stm32_brazo_extendido = False
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
+                self.ts_orden_extender = now
                 self.get_logger().info(
                     f"[CALIBRACIÓN BOMBA] Extendiendo brazo +{self.desplazamiento_brazo_mm:.0f}mm "
                     "al encender el robot (esperando código 4 de STM32)..."
                 )
 
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
-                self.comandar_bomba(True)
-                self.estado_actual = 'CAL_BOMBA_ACTIVA'
-                self.tiempo_inicio_estado = now
-                self.get_logger().info(
-                    f"[CALIBRACIÓN BOMBA] Brazo extendido confirmado (código 4). "
-                    f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
+                duracion_ext = (
+                    (self.ts_codigo_brazo_extendido - self.ts_orden_extender)
+                    if (self.ts_codigo_brazo_extendido is not None and self.ts_orden_extender is not None)
+                    else 10.0
                 )
+                # Un recorrido completo de ~400 mm a 40 mm/s tarda ~10 s. Si llegó a END en < 4.5 s,
+                # el brazo no partió desde HOME (ej. rutina anterior abortada) y screw_mm en la STM32
+                # puede ser < 390 mm (MARGEN_MM en bomba.c), lo que bloquearía la bomba.
+                if duracion_ext < 4.5:
+                    self.get_logger().warn(
+                        f"[CALIBRACIÓN BOMBA] El brazo tocó END en solo {duracion_ext:.1f}s "
+                        "(ya estaba extendido al iniciar, por lo que screw_mm < 390mm en STM32). "
+                        "Retrayendo a HOME primero para sincronizar posición..."
+                    )
+                    self.rehoming_en_calibracion = True
+                    self.orden_retraer_enviada = False
+                    self.stm32_brazo_retraido = False
+                    self.stm32_brazo_extendido = False
+                    self.tiempo_inicio_estado = now
+                    return
+
+                # Activar bomba de inmediato al recibir código 4 y aplicar micro-avance de +8 mm
+                # tras el retroceso de -10 mm de INTR_END() para asegurar screw_mm > 390 mm en bomba.c
+                if not self.bomba_activa:
+                    self.comandar_bomba(True)
+
+                t_desde_end = (
+                    (now - self.ts_codigo_brazo_extendido)
+                    if self.ts_codigo_brazo_extendido is not None
+                    else 1.0
+                )
+                if not self.micro_avance_end_enviado and t_desde_end >= 0.45:
+                    msg_micro = Float32()
+                    msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm sin tocar switch END
+                    self.brazo_pub.publish(msg_micro)
+                    self.micro_avance_end_enviado = True
+                    self.comandar_bomba(True)
+                elif self.micro_avance_end_enviado and t_desde_end >= 0.80:
+                    self.comandar_bomba(True)
+                    self.estado_actual = 'CAL_BOMBA_ACTIVA'
+                    self.tiempo_inicio_estado = now
+                    self.get_logger().info(
+                        f"[CALIBRACIÓN BOMBA] Brazo extendido confirmado (código 4). "
+                        f"Activando bomba por {self.tiempo_calibracion_bomba:.1f}s para llenar la manguera..."
+                    )
 
         elif self.estado_actual == 'CAL_BOMBA_ACTIVA':
             msg_vel.linear.x = 0.0
@@ -723,15 +795,22 @@ class BombaRutinaNavegacion(Node):
                 self.orden_retraer_enviada = True
 
             if self.orden_retraer_enviada and self.stm32_brazo_retraido and not self.brazo_extendido:
-                self.brazo_retraido_confirmado = True
-                self.calibracion_bomba_completada = True
-                self.estado_actual = 'AVANZANDO'
-                self.tiempo_inicio_estado = now
-                self.tiempo_ultimo_arbol = now
-                self.get_logger().info(
-                    "[CALIBRACIÓN BOMBA] Brazo retraído confirmado (código 3). "
-                    "Calibración de bomba finalizada. Iniciando rutina de búsqueda de árboles..."
+                # Esperar 0.50 s tras código 3 para que INTR_HOME() termine MOVE_Stepper(+10 mm)
+                t_desde_home = (
+                    (now - self.ts_codigo_brazo_retraido)
+                    if self.ts_codigo_brazo_retraido is not None
+                    else 1.0
                 )
+                if t_desde_home >= 0.50:
+                    self.brazo_retraido_confirmado = True
+                    self.calibracion_bomba_completada = True
+                    self.estado_actual = 'AVANZANDO'
+                    self.tiempo_inicio_estado = now
+                    self.tiempo_ultimo_arbol = now
+                    self.get_logger().info(
+                        "[CALIBRACIÓN BOMBA] Brazo retraído confirmado (código 3). "
+                        "Calibración de bomba finalizada. Iniciando rutina de búsqueda de árboles..."
+                    )
 
         elif self.estado_actual == 'AVANZANDO':
             # Garantía de seguridad: solo avanzar si el brazo está retraído y la bomba apagada
@@ -832,22 +911,52 @@ class BombaRutinaNavegacion(Node):
         elif self.estado_actual == 'EXTENDIENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
-            if not self.orden_extender_enviada and tiempo_transcurrido >= 0.10:
+            # Garantizar que hayan pasado al menos 0.50 s desde el último código 3 (INTR_HOME)
+            # para que drv8825.c no esté ocupado en MOVE_Stepper(BACK_MARGIN) (state == RUN)
+            home_listo = (
+                self.ts_codigo_brazo_retraido is None
+                or (now - self.ts_codigo_brazo_retraido) >= 0.50
+            )
+            if not self.orden_extender_enviada and tiempo_transcurrido >= 0.15 and home_listo:
                 self.stm32_brazo_extendido = False
                 self.comandar_brazo('EXTENDER')
                 self.orden_extender_enviada = True
 
-            # Cuando la STM32 confirma código 4 (brazo extendido), activa la bomba (si usar_bomba=True) e inicia barrido
+            # Cuando la STM32 confirma código 4 (brazo extendido), esperamos 0.45 s a que termine
+            # MOVE_Stepper(-10 mm) de INTR_END(), compensamos +8 mm para asegurar screw_mm > 390 mm
+            # en bomba.c, encendemos la bomba con las ruedas aún detenidas (0.35 s para superar
+            # el pulso WAKE de 200 ms de la bomba sin competir con el arranque de los 4 motores)
+            # y luego iniciamos BARRIENDO_BRAZO.
             if self.orden_extender_enviada and self.stm32_brazo_extendido:
                 if self.usar_bomba:
-                    self.comandar_bomba(True)
-                self.estado_actual = 'BARRIENDO_BRAZO'
-                self.tiempo_inicio_estado = now
-                modo_barrido_txt = "Bomba ACTIVADA e iniciando" if self.usar_bomba else "Iniciando (sin bomba)"
-                self.get_logger().info(
-                    f"STM32 confirmó brazo extendido (código 4). "
-                    f"{modo_barrido_txt} barrido durante {self.tiempo_barrido_brazo:.1f}s..."
-                )
+                    if not self.bomba_activa:
+                        self.comandar_bomba(True)
+                    t_desde_end = (
+                        (now - self.ts_codigo_brazo_extendido)
+                        if self.ts_codigo_brazo_extendido is not None
+                        else 1.0
+                    )
+                    if not self.micro_avance_end_enviado and t_desde_end >= 0.45:
+                        msg_micro = Float32()
+                        msg_micro.data = 8.0  # +8 mm (+0.8 cm) recupera screw_mm > 390 mm en bomba.c
+                        self.brazo_pub.publish(msg_micro)
+                        self.micro_avance_end_enviado = True
+                        self.comandar_bomba(True)
+                    elif self.micro_avance_end_enviado and t_desde_end >= 0.85:
+                        self.comandar_bomba(True)
+                        self.estado_actual = 'BARRIENDO_BRAZO'
+                        self.tiempo_inicio_estado = now
+                        self.get_logger().info(
+                            f"STM32 confirmó brazo extendido (código 4). "
+                            f"Bomba ACTIVADA e iniciando barrido durante {self.tiempo_barrido_brazo:.1f}s..."
+                        )
+                else:
+                    self.estado_actual = 'BARRIENDO_BRAZO'
+                    self.tiempo_inicio_estado = now
+                    self.get_logger().info(
+                        f"STM32 confirmó brazo extendido (código 4). "
+                        f"Iniciando (sin bomba) barrido durante {self.tiempo_barrido_brazo:.1f}s..."
+                    )
 
         elif self.estado_actual == 'BARRIENDO_BRAZO':
             # Avanza en línea recta con el brazo extendido (y bomba activa si usar_bomba=True) durante `tiempo_barrido_brazo`

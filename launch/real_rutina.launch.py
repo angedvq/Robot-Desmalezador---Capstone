@@ -37,11 +37,14 @@ def generate_launch_description():
     umbral_nir_min = LaunchConfiguration('umbral_nir_min')
     umbral_nir_fijo = LaunchConfiguration('umbral_nir_fijo')
     delta_contraste_fondo = LaunchConfiguration('delta_contraste_fondo')
+    roi_ancho_cm = LaunchConfiguration('roi_ancho_cm')
+    roi_alto_cm = LaunchConfiguration('roi_alto_cm')
     min_ancho_cm = LaunchConfiguration('min_ancho_cm')
     min_alto_cm = LaunchConfiguration('min_alto_cm')
     px_por_cm = LaunchConfiguration('px_por_cm')
     area_min_px = LaunchConfiguration('area_min_px')
     mostrar_ventana = LaunchConfiguration('mostrar_ventana')
+    gui = LaunchConfiguration('gui')
     log_calibracion = LaunchConfiguration('log_calibracion')
 
     # Nodo unificado que gestiona los 4 casos posibles de (usar_mapir x usar_bomba):
@@ -197,8 +200,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'umbral_nir_min',
-            default_value='150',
-            description='Intensidad NIR mínima absoluta para considerar maleza (0..255)',
+            default_value='25',
+            description='Intensidad NIR mínima absoluta para considerar maleza en baja luz/pasillo (0..255)',
         ),
         DeclareLaunchArgument(
             'umbral_nir_fijo',
@@ -207,33 +210,48 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'delta_contraste_fondo',
-            default_value='35',
-            description='Diferencia mínima de intensidad NIR sobre la mediana del suelo en modo híbrido',
+            default_value='14',
+            description='Diferencia base de intensidad sobre el suelo en modo híbrido adaptativo',
+        ),
+        DeclareLaunchArgument(
+            'roi_ancho_cm',
+            default_value='15.0',
+            description='Ancho físico de la Región de Interés (ROI) centrada de la cámara MAPIR (cm)',
+        ),
+        DeclareLaunchArgument(
+            'roi_alto_cm',
+            default_value='15.0',
+            description='Alto físico de la Región de Interés (ROI) centrada de la cámara MAPIR (cm)',
         ),
         DeclareLaunchArgument(
             'min_ancho_cm',
-            default_value='5.0',
+            default_value='3.0',
             description='Ancho mínimo del bounding box de maleza para ser considerada válida (cm)',
         ),
         DeclareLaunchArgument(
             'min_alto_cm',
-            default_value='5.0',
+            default_value='3.0',
             description='Alto mínimo del bounding box de maleza para ser considerada válida (cm)',
         ),
         DeclareLaunchArgument(
             'px_por_cm',
             default_value='16.0',
-            description='Factor de conversión píxeles por centímetro a 1280x720 (~16 px/cm -> 5 cm = 80 px)',
+            description='Factor de conversión píxeles por centímetro a 1280x720 (~16 px/cm -> 15 cm = 240 px, 3 cm = 48 px)',
         ),
         DeclareLaunchArgument(
             'area_min_px',
-            default_value='500',
+            default_value='250',
             description='Área mínima de contorno (píxeles) para validar maleza',
         ),
         DeclareLaunchArgument(
             'mostrar_ventana',
             default_value='false',
             description='Mostrar ventana OpenCV con trackbars de calibración (requiere monitor/DISPLAY)',
+        ),
+        DeclareLaunchArgument(
+            'gui',
+            default_value='false',
+            description='Alias de mostrar_ventana para abrir la GUI de detección MAPIR con bounding boxes',
         ),
         DeclareLaunchArgument(
             'log_calibracion',
@@ -311,11 +329,14 @@ def generate_launch_description():
                 'umbral_nir_min': umbral_nir_min,
                 'umbral_nir_fijo': umbral_nir_fijo,
                 'delta_contraste_fondo': delta_contraste_fondo,
+                'roi_ancho_cm': roi_ancho_cm,
+                'roi_alto_cm': roi_alto_cm,
                 'min_ancho_cm': min_ancho_cm,
                 'min_alto_cm': min_alto_cm,
                 'px_por_cm': px_por_cm,
                 'area_min_px': area_min_px,
                 'mostrar_ventana': mostrar_ventana,
+                'gui': gui,
                 'log_calibracion': log_calibracion,
             }],
             condition=IfCondition(usar_mapir),
