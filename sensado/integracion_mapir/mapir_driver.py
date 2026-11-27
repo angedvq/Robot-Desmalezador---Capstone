@@ -37,6 +37,7 @@ class MapirDriverReal(Node):
         self.declare_parameter('fps', 15.0)
         self.declare_parameter('auto_detect_port', True)
         self.declare_parameter('bloquear_auto_exposicion', True)
+        self.declare_parameter('bloquear_exposicion', True)  # Alias corto para pruebas por consola
         self.declare_parameter('exposicion_fija', -1.0)  # Si > 0, fija ese valor manual desde el inicio
 
         self.puerto_preferido = int(self.get_parameter('video_port').value)
@@ -44,7 +45,10 @@ class MapirDriverReal(Node):
         self.frame_height = int(self.get_parameter('frame_height').value)
         self.fps = max(1.0, float(self.get_parameter('fps').value))
         self.auto_detect_port = bool(self.get_parameter('auto_detect_port').value)
-        self.bloquear_auto_exposicion = bool(self.get_parameter('bloquear_auto_exposicion').value)
+        self.bloquear_auto_exposicion = (
+            bool(self.get_parameter('bloquear_auto_exposicion').value)
+            and bool(self.get_parameter('bloquear_exposicion').value)
+        )
         self.exposicion_fija = float(self.get_parameter('exposicion_fija').value)
 
         self.publisher_ = self.create_publisher(Image, '/image_raw', 10)
@@ -96,12 +100,15 @@ class MapirDriverReal(Node):
         """Permite bloquear (True) o liberar (False) la auto-exposición desde el nodo calibrador."""
         if self.cap is None or not self.cap.isOpened():
             return
+        if not self.bloquear_auto_exposicion:
+            return
         if bool(msg.data):
             self._aplicar_bloqueo_exposicion(motivo="calibración con panel MAPIR completada")
         else:
             try:
                 # 3 = Auto Exposure en V4L2
                 self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                self.cap.set(cv2.CAP_PROP_AUTO_WB, 1)
                 self.exposicion_bloqueada = False
                 self.get_logger().info("[MAPIR Driver] Auto-exposición reactivada para re-calibrar.")
             except Exception:
@@ -118,6 +125,13 @@ class MapirDriverReal(Node):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_height)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Siempre iniciar con Auto-Exposición y Auto-WB activos en V4L2
+        try:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            cap.set(cv2.CAP_PROP_AUTO_WB, 1)
+        except Exception:
+            pass
 
         # Leer un frame de prueba para descartar nodos de metadatos V4L2
         ret, frame = cap.read()
@@ -154,7 +168,8 @@ class MapirDriverReal(Node):
                 alto_real = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 self.get_logger().info(
                     f"Cámara MAPIR conectada en /dev/video{idx} "
-                    f"({ancho_real}x{alto_real} @ {self.fps:.1f} FPS)"
+                    f"({ancho_real}x{alto_real} @ {self.fps:.1f} FPS) | "
+                    f"Bloqueo auto-exposición: {'ACTIVO' if self.bloquear_auto_exposicion else 'DESACTIVADO (libre)'}"
                 )
                 return True
 

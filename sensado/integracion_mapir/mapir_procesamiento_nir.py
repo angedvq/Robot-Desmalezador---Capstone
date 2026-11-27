@@ -22,6 +22,7 @@ Nodo de procesamiento y detección de maleza con cámara MAPIR (NIR) basado en:
 
 import json
 import os
+import time
 from collections import deque
 import rclpy
 from rclpy.node import Node
@@ -31,7 +32,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
-CALIB_FILE_PATH = os.path.expanduser("~/.config/sensado_mapir_calibracion.json")
+CALIB_FILE_PATH = os.path.expanduser("~/Capstone/ros2_ws/src/sensado/parametros_mapir.json")
 
 
 def detectar_panel_mapir(gris: np.ndarray, vista_gui: np.ndarray = None):
@@ -253,6 +254,10 @@ class MapirProcesadorMalezaNIR(Node):
         self.ultimo_i23 = 0.0
         self.ultimo_i51 = 0.0
         self.ultimo_i87 = 0.0
+        self.aviso_guardado_hasta = 0.0
+
+        # Cargar automáticamente los últimos valores guardados en JSON si el archivo existe
+        self._cargar_calibracion_json()
 
         # Historial temporal de detecciones
         self.historial_deteccion = deque(maxlen=self.ventana_frames)
@@ -294,6 +299,51 @@ class MapirProcesadorMalezaNIR(Node):
         msg.data = bool(self.calibrado)
         self.pub_calibrado.publish(msg)
 
+    def _cargar_calibracion_json(self):
+        """Carga automáticamente al iniciar los últimos parámetros guardados en CALIB_FILE_PATH."""
+        if not os.path.isfile(CALIB_FILE_PATH):
+            return
+        try:
+            with open(CALIB_FILE_PATH, 'r', encoding='utf-8') as f:
+                datos = json.load(f)
+
+            if 'umbral_nir' in datos:
+                self.umbral_nir = int(np.clip(int(datos['umbral_nir']), 0, 255))
+            if 'umbral_max' in datos:
+                self.umbral_max = int(np.clip(int(datos['umbral_max']), max(240, self.umbral_nir + 5), 255))
+            if 'factor_panel_pct' in datos:
+                self.factor_panel_pct = int(np.clip(int(datos['factor_panel_pct']), 10, 120))
+            if 'roi_ancho_cm' in datos:
+                self.roi_ancho_cm = float(max(5.0, float(datos['roi_ancho_cm'])))
+            if 'roi_alto_cm' in datos:
+                self.roi_alto_cm = float(max(5.0, float(datos['roi_alto_cm'])))
+            if 'min_ancho_cm' in datos:
+                self.min_ancho_cm = float(max(0.5, float(datos['min_ancho_cm'])))
+            if 'min_alto_cm' in datos:
+                self.min_alto_cm = float(max(0.5, float(datos['min_alto_cm'])))
+            if 'area_min_px' in datos:
+                self.area_min_px = int(max(50, int(datos['area_min_px'])))
+            if 'i23' in datos:
+                self.ultimo_i23 = float(datos['i23'])
+            if 'i51' in datos:
+                self.ultimo_i51 = float(datos['i51'])
+            if 'i87' in datos:
+                self.ultimo_i87 = float(datos['i87'])
+
+            self.get_logger().info(
+                f"\n============================================================\n"
+                f" [PARÁMETROS MAPIR CARGADOS DESDE JSON]\n"
+                f"   Archivo       : {CALIB_FILE_PATH}\n"
+                f"   Umbral NIR    : {self.umbral_nir} (Max: {self.umbral_max})\n"
+                f"   Factor Panel  : {self.factor_panel_pct}%\n"
+                f"   ROI           : {self.roi_ancho_cm:.1f} x {self.roi_alto_cm:.1f} cm\n"
+                f"   Min Ancho/Alto: {self.min_ancho_cm:.1f} x {self.min_alto_cm:.1f} cm\n"
+                f"   Área Mínima   : {self.area_min_px} px\n"
+                f"============================================================"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"No se pudo cargar {CALIB_FILE_PATH}: {e}")
+
     def _guardar_calibracion_json(self):
         try:
             os.makedirs(os.path.dirname(CALIB_FILE_PATH), exist_ok=True)
@@ -301,14 +351,31 @@ class MapirProcesadorMalezaNIR(Node):
                 'umbral_nir': int(self.umbral_nir),
                 'umbral_max': int(self.umbral_max),
                 'factor_panel_pct': int(self.factor_panel_pct),
+                'roi_ancho_cm': round(float(self.roi_ancho_cm), 2),
+                'roi_alto_cm': round(float(self.roi_alto_cm), 2),
+                'min_ancho_cm': round(float(self.min_ancho_cm), 2),
+                'min_alto_cm': round(float(self.min_alto_cm), 2),
+                'area_min_px': int(self.area_min_px),
                 'i23': round(self.ultimo_i23, 1),
                 'i51': round(self.ultimo_i51, 1),
                 'i87': round(self.ultimo_i87, 1),
             }
             with open(CALIB_FILE_PATH, 'w', encoding='utf-8') as f:
                 json.dump(datos, f, indent=2)
-        except Exception:
-            pass
+            self.aviso_guardado_hasta = time.time() + 2.5
+            self.get_logger().info(
+                f"\n============================================================\n"
+                f" [PARÁMETROS MAPIR GUARDADOS EN JSON]\n"
+                f"   Archivo       : {CALIB_FILE_PATH}\n"
+                f"   Umbral NIR    : {self.umbral_nir} (Max: {self.umbral_max})\n"
+                f"   Factor Panel  : {self.factor_panel_pct}%\n"
+                f"   ROI           : {self.roi_ancho_cm:.1f} x {self.roi_alto_cm:.1f} cm\n"
+                f"   Min Ancho/Alto: {self.min_ancho_cm:.1f} x {self.min_alto_cm:.1f} cm\n"
+                f"   Área Mínima   : {self.area_min_px} px\n"
+                f"============================================================"
+            )
+        except Exception as e:
+            self.get_logger().error(f"Error guardando parámetros en {CALIB_FILE_PATH}: {e}")
 
     def _inicializar_trackbars(self):
         """Crea las ventanas GUI y barras deslizantes que permanecen abiertas toda la rutina."""
@@ -581,7 +648,7 @@ class MapirProcesadorMalezaNIR(Node):
             )
             texto_cal = (
                 f"{info_panel}Umbral NIR: {self.umbral_nir} | "
-                f"ROI Med:{mediana_roi:.0f} P95:{p95_roi:.0f} | Tecla 'r': Re-calibrar panel"
+                f"ROI Med:{mediana_roi:.0f} P95:{p95_roi:.0f} | Enter: Guardar JSON | 'r': Re-calibrar"
             )
             cv2.putText(vista_debug, texto_estado, (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_estado, 2)
             cv2.putText(vista_debug, texto_cal, (15, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
@@ -594,6 +661,18 @@ class MapirProcesadorMalezaNIR(Node):
                     f"MALEZA: {'SI' if maleza_confirmada else 'NO'}",
                     throttle_duration_sec=1.5,
                 )
+
+        if time.time() < self.aviso_guardado_hasta:
+            cv2.rectangle(vista_debug, (15, alto - 60), (ancho - 15, alto - 15), (0, 140, 0), -1)
+            cv2.putText(
+                vista_debug,
+                f"PARAMETROS GUARDADOS EN: {CALIB_FILE_PATH}",
+                (25, alto - 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (255, 255, 255),
+                2,
+            )
 
         if self.pub_debug_img.get_subscription_count() > 0:
             msg_dbg = self.bridge.cv2_to_imgmsg(vista_debug, encoding='bgr8')
@@ -617,19 +696,16 @@ class MapirProcesadorMalezaNIR(Node):
                     msg_lock.data = True
                     self.pub_lock_exp.publish(msg_lock)
                     self._publicar_estado_calibracion()
-                    self.get_logger().info(
-                        f"[CALIBRACIÓN MAPIR] Confirmada manualmente con Umbral NIR = {self.umbral_nir}"
-                    )
-            elif key in (32, 13):  # Espacio o Enter: confirmar umbral actual de la barra deslizante
+                    self._guardar_calibracion_json()
+            elif key in (10, 13, 141, 32, ord('s'), ord('S'), ord('g'), ord('G')):
+                # Enter (LF=10, CR=13, Numpad=141), Espacio (32) o 's'/'g':
+                # Guardar todos los parámetros actuales de la GUI en ~/Capstone/ros2_ws/src/sensado/parametros_mapir.json
                 self.calibrado = True
                 msg_lock = Bool()
                 msg_lock.data = True
                 self.pub_lock_exp.publish(msg_lock)
                 self._publicar_estado_calibracion()
                 self._guardar_calibracion_json()
-                self.get_logger().info(
-                    f"[CALIBRACIÓN MAPIR] Confirmada desde GUI con Umbral NIR = {self.umbral_nir}"
-                )
             elif key in (ord('r'), ord('R')):
                 # Volver a modo calibración con panel y desbloquear auto-exposición temporalmente
                 self.calibrado = False
