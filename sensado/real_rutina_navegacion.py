@@ -41,8 +41,6 @@ class RealRutinaNavegacion(Node):
         self.declare_parameter('timeout_sin_arbol', 50.0)    
         self.declare_parameter('tiempo_calibracion_bomba', 5.0)   # Tiempo inicial cebando la manguera con brazo extendido (s)
         self.declare_parameter('tiempo_barrido_brazo', 2.5)       # Tiempo avanzando con el brazo extendido haciendo barrido (s)
-        self.declare_parameter('tiempo_delay_brazo', 1.5)         # Parámetro legado (no usado en modo barrido)
-        self.declare_parameter('tiempo_brazo_extendido', 2.0)     # Respaldo / alias para duración con brazo extendido (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)        # Ceguera temporal para avanzar a sgte tronco (s)
         self.declare_parameter('desplazamiento_brazo_mm', 600.0)  # +600 mm (+60 cm) extiende, -600 mm retrae
 
@@ -71,8 +69,6 @@ class RealRutinaNavegacion(Node):
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
         self.tiempo_calibracion_bomba = float(self.get_parameter('tiempo_calibracion_bomba').value)
         self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
-        self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
-        self.tiempo_brazo_extendido = float(self.get_parameter('tiempo_brazo_extendido').value)
         self.tiempo_enfriamiento = float(self.get_parameter('tiempo_enfriamiento').value)
         self.desplazamiento_brazo_mm = abs(float(self.get_parameter('desplazamiento_brazo_mm').value))
 

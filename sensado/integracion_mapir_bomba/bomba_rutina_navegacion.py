@@ -69,10 +69,8 @@ class BombaRutinaNavegacion(Node):
         self.declare_parameter('timeout_sin_arbol', 50.0)
         self.declare_parameter('tiempo_calibracion_bomba', 5.0)     # Tiempo inicial cebando la manguera con brazo extendido (s)
         self.declare_parameter('tiempo_barrido_brazo', 2.5)         # Tiempo avanzando con el brazo extendido haciendo barrido (s)
-        self.declare_parameter('tiempo_delay_brazo', 1.5)           # Parámetro legado
         self.declare_parameter('tiempo_verificacion_maleza', 2.0)   # Ventana de inspección MAPIR estando detenido (s)
         self.declare_parameter('tiempo_estabilizacion_camara', 0.3) # Espera tras frenar antes de muestrear MAPIR (s)
-        self.declare_parameter('tiempo_brazo_extendido', 2.0)       # Parámetro legado / respaldo (s)
         self.declare_parameter('tiempo_enfriamiento', 3.0)          # Ceguera temporal para avanzar al siguiente tronco (s)
         self.declare_parameter('desplazamiento_brazo_mm', 600.0)    # +600 mm (+60 cm) extiende, -600 mm retrae
 
@@ -103,10 +101,8 @@ class BombaRutinaNavegacion(Node):
         self.timeout_sin_arbol = float(self.get_parameter('timeout_sin_arbol').value)
         self.tiempo_calibracion_bomba = float(self.get_parameter('tiempo_calibracion_bomba').value)
         self.tiempo_barrido_brazo = float(self.get_parameter('tiempo_barrido_brazo').value)
-        self.tiempo_delay_brazo = float(self.get_parameter('tiempo_delay_brazo').value)
         self.tiempo_verificacion_maleza = float(self.get_parameter('tiempo_verificacion_maleza').value)
         self.tiempo_estabilizacion_camara = float(self.get_parameter('tiempo_estabilizacion_camara').value)
-        self.tiempo_brazo_extendido = float(self.get_parameter('tiempo_brazo_extendido').value)
         self.tiempo_enfriamiento = float(self.get_parameter('tiempo_enfriamiento').value)
         self.desplazamiento_brazo_mm = abs(float(self.get_parameter('desplazamiento_brazo_mm').value))
 
@@ -123,6 +119,7 @@ class BombaRutinaNavegacion(Node):
         self.grados_pub = self.create_publisher(Float32, '/navegacion/corregir_grados', 10)
         self.brazo_pub = self.create_publisher(Float32, '/brazo_mm', 10)
         self.bomba_pub = self.create_publisher(Bool, '/bomba', 10)
+        self.hab_cal_mapir_pub = self.create_publisher(Bool, '/mapir/habilitar_calibracion', 10)
 
         # ---------------------------------------------------------------------
         # Suscriptores de percepción (LiDAR, TF-Mini, MAPIR) y STM32
@@ -142,14 +139,27 @@ class BombaRutinaNavegacion(Node):
         self.cobertura_sub = self.create_subscription(
             Float32, '/mapir/porcentaje_maleza', self.cobertura_callback, 10
         )
+        self.calibrado_sub = self.create_subscription(
+            Bool, '/mapir/calibrado', self.mapir_calibrado_callback, 10
+        )
 
         # ---------------------------------------------------------------------
         # Variables de estado y temporizadores
-        # Si `usar_bomba=True`, inicia en `CAL_EXTENDIENDO_BRAZO` para cebar la manguera 5s.
-        # Si `usar_bomba=False`, salta la calibración de bomba e inicia directo en `AVANZANDO`.
+        # Orden estricto de calibración inicial:
+        # 1° Si `usar_bomba=True`: inicia en `CAL_EXTENDIENDO_BRAZO` (calibra bomba 5s y retrae).
+        # 2° Después de la bomba (o al inicio si `usar_bomba=False`), si `usar_mapir=True`:
+        #    pasa a `CALIBRANDO_MAPIR` ("Esperando calibracion - apuntar panel").
+        # 3° Una vez completadas ambas calibraciones activas: pasa a `AVANZANDO`.
         # ---------------------------------------------------------------------
-        self.estado_actual = 'CAL_EXTENDIENDO_BRAZO' if self.usar_bomba else 'AVANZANDO'
+        if self.usar_bomba:
+            self.estado_actual = 'CAL_EXTENDIENDO_BRAZO'
+        elif self.usar_mapir:
+            self.estado_actual = 'CALIBRANDO_MAPIR'
+        else:
+            self.estado_actual = 'AVANZANDO'
+
         self.calibracion_bomba_completada = not self.usar_bomba
+        self.mapir_calibrada = not self.usar_mapir
         self.arboles_procesados = 0
         self.arboles_con_maleza = 0
         self.arbol_en_mira = False
@@ -274,6 +284,10 @@ class BombaRutinaNavegacion(Node):
                 self.max_cobertura_en_parada = max(
                     self.max_cobertura_en_parada, self.porcentaje_maleza_actual
                 )
+
+    def mapir_calibrado_callback(self, msg: Bool):
+        """Recibe confirmación de que el panel de reflectancia MAPIR ya fue calibrado."""
+        self.mapir_calibrada = bool(msg.data)
 
     def tree_callback(self, msg: PoseArray):
         """Recibe las detecciones de troncos en la ventana lateral."""
@@ -631,6 +645,7 @@ class BombaRutinaNavegacion(Node):
             'CAL_EXTENDIENDO_BRAZO',
             'CAL_BOMBA_ACTIVA',
             'CAL_RETRAYENDO_BRAZO',
+            'CALIBRANDO_MAPIR',
             'VERIFICANDO_MALEZA',
             'EXTENDIENDO_BRAZO',
             'RETRAYENDO_BRAZO',
@@ -701,9 +716,17 @@ class BombaRutinaNavegacion(Node):
 
         # ---------------------------------------------------------------------
         # Máquina de Estados:
-        # Fase 0: Calibración inicial de bomba al encender (solo si usar_bomba=True)
-        # Fase 1: Navegación + Inspección MAPIR (si usar_mapir=True) + Barrido (con o sin Bomba)
+        # Fase 0.A: PRIMERO calibración de bomba al encender (si usar_bomba=True)
+        # Fase 0.B: DESPUÉS calibración con panel de reflectancia MAPIR (si usar_mapir=True)
+        # Fase 1:   DESPUÉS búsqueda de árboles + Inspección MAPIR + Barrido (con o sin Bomba)
         # ---------------------------------------------------------------------
+        if self.estado_actual in ('CAL_EXTENDIENDO_BRAZO', 'CAL_BOMBA_ACTIVA', 'CAL_RETRAYENDO_BRAZO'):
+            # Mientras se calibra la bomba, mantener pausada la lectura del panel MAPIR
+            if self.usar_mapir:
+                msg_hab = Bool()
+                msg_hab.data = False
+                self.hab_cal_mapir_pub.publish(msg_hab)
+
         if self.estado_actual == 'CAL_EXTENDIENDO_BRAZO':
             msg_vel.linear.x = 0.0
 
@@ -833,17 +856,52 @@ class BombaRutinaNavegacion(Node):
                 elif self.stepper_sleep_home_enviado and t_desde_home >= 1.50:
                     self.brazo_retraido_confirmado = True
                     self.calibracion_bomba_completada = True
-                    self.estado_actual = 'AVANZANDO'
                     self.tiempo_inicio_estado = now
                     self.tiempo_ultimo_arbol = now
                     self.rumbo_integral = 0.0
                     self.rumbo_suavizado = 0.0
                     self.error_previo = None
                     self.derivada_error_filtrada = 0.0
-                    self.get_logger().info(
-                        "[CALIBRACIÓN BOMBA] Brazo retraído y stepper en SLEEP (código 3). "
-                        "Calibración finalizada. Iniciando avance con rampa suave..."
-                    )
+
+                    if self.usar_mapir and not self.mapir_calibrada:
+                        self.estado_actual = 'CALIBRANDO_MAPIR'
+                        msg_hab = Bool()
+                        msg_hab.data = True
+                        self.hab_cal_mapir_pub.publish(msg_hab)
+                        self.get_logger().info(
+                            "[CALIBRACIÓN BOMBA] Brazo retraído y stepper en SLEEP (código 3). "
+                            "Calibración de bomba finalizada. Pasando a calibración de cámara MAPIR..."
+                        )
+                    else:
+                        self.estado_actual = 'AVANZANDO'
+                        self.get_logger().info(
+                            "[CALIBRACIÓN BOMBA] Brazo retraído y stepper en SLEEP (código 3). "
+                            "Calibración finalizada. Iniciando búsqueda de árboles con rampa suave..."
+                        )
+
+        elif self.estado_actual == 'CALIBRANDO_MAPIR':
+            msg_vel.linear.x = 0.0
+            msg_hab = Bool()
+            msg_hab.data = True
+            self.hab_cal_mapir_pub.publish(msg_hab)
+
+            if not self.mapir_calibrada:
+                self.get_logger().info(
+                    "Esperando calibracion - apuntar panel",
+                    throttle_duration_sec=2.5,
+                )
+            else:
+                self.inicio_rutina_ts = now
+                self.estado_actual = 'AVANZANDO'
+                self.tiempo_inicio_estado = now
+                self.tiempo_ultimo_arbol = now
+                self.rumbo_integral = 0.0
+                self.rumbo_suavizado = 0.0
+                self.error_previo = None
+                self.derivada_error_filtrada = 0.0
+                self.get_logger().info(
+                    "[CALIBRACIÓN MAPIR] Panel calibrado con éxito. Iniciando rutina de búsqueda de árboles..."
+                )
 
         elif self.estado_actual == 'AVANZANDO':
             # Garantía de seguridad: solo avanzar si el brazo está retraído y la bomba apagada
